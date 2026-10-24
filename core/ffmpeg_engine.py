@@ -66,9 +66,78 @@ class VideoRenderEngine:
         if ffmpeg_path:
             self.ffmpeg_path = ffmpeg_path
         self._is_cancelled = False
+        self._active_processes: set = set()
+        self._process_lock = threading.Lock()
+
+    def _kill_process(self, proc: subprocess.Popen):
+        """徹底強制終止行程樹（包含 Windows 子行程樹），瞬間釋放 CPU、GPU 與 RAM！"""
+        try:
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    startupinfo=startupinfo,
+                    timeout=2,
+                )
+            else:
+                proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     def cancel(self):
+        """立即取消所有渲染，秒速終止所有活躍中的 FFmpeg 程序！"""
         self._is_cancelled = True
+        with self._process_lock:
+            for proc in list(self._active_processes):
+                self._kill_process(proc)
+            self._active_processes.clear()
+
+    def _run_command_cancellable(
+        self, cmd: List[str], startupinfo=None, timeout: Optional[float] = None
+    ) -> Tuple[int, str, str]:
+        """
+        支援即時硬終止（Hard Kill）的可取消子行程執行方法。
+        當使用者按下終止時，所有活躍中的 FFmpeg 程序會被立即 taskkill，絕不卡死！
+        """
+        if self._is_cancelled:
+            return -1, "", "已取消"
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=startupinfo,
+            )
+        except Exception as e:
+            return -1, "", str(e)
+
+        with self._process_lock:
+            if self._is_cancelled:
+                self._kill_process(proc)
+                return -1, "", "已取消"
+            self._active_processes.add(proc)
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return proc.returncode, stdout, stderr
+        except subprocess.TimeoutExpired:
+            self._kill_process(proc)
+            return -1, "", "執行逾時"
+        except Exception as e:
+            self._kill_process(proc)
+            return -1, "", str(e)
+        finally:
+            with self._process_lock:
+                self._active_processes.discard(proc)
 
     def _get_video_duration(self, video_path: str) -> float:
         """使用 ffprobe 取得影片的精準長度（秒）"""
@@ -402,14 +471,23 @@ class VideoRenderEngine:
                     )
                 return ok, idx
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.concurrency) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.concurrency)
+            try:
                 future_to_task = {executor.submit(_worker_task, t): t for t in tasks}
                 for future in concurrent.futures.as_completed(future_to_task):
                     if self._is_cancelled:
                         executor.shutdown(wait=False, cancel_futures=True)
                         return False
 
-                    ok, idx = future.result()
+                    try:
+                        ok, idx = future.result()
+                    except Exception:
+                        ok = False
+
+                    if self._is_cancelled:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
+
                     with lock:
                         completed_count += 1
                         elapsed = time.time() - start_time
@@ -424,6 +502,11 @@ class VideoRenderEngine:
                                 total_items,
                                 f"{part_prefix}平行加速中 ({completed_count}/{total_items}) - 速度: {speed:.1f} 項/秒 (預估剩餘: {eta_str})",
                             )
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+            if self._is_cancelled:
+                return False
 
             # 3. 循序收集已成功產生的片段檔案（嚴格確保播放順序零錯亂）
             for idx in range(total_items):
@@ -536,30 +619,23 @@ class VideoRenderEngine:
                 "-t", str(duration),
                 output_file,
             ]
-            try:
-                res_encode = subprocess.run(
-                    cmd_encode,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    startupinfo=startupinfo,
-                )
-                if res_encode.returncode != 0:
-                    if log_callback:
-                        err_lines = [
-                            line.strip()
-                            for line in res_encode.stderr.split("\n")
-                            if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
-                        ]
-                        detail = err_lines[0] if err_lines else res_encode.stderr.strip().split("\n")[-1]
-                        log_callback(f"【相片編碼失敗】{item.file_name} -> 原因：{detail}")
-                    return False
-                return True
-            except Exception as e:
-                if log_callback:
-                    log_callback(f"【相片渲染異常】{item.file_name} -> {e}")
+            ret_code, stdout, stderr = self._run_command_cancellable(
+                cmd_encode, startupinfo=startupinfo
+            )
+            if self._is_cancelled:
                 return False
+
+            if ret_code != 0:
+                if log_callback:
+                    err_lines = [
+                        line.strip()
+                        for line in stderr.split("\n")
+                        if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
+                    ]
+                    detail = err_lines[0] if err_lines else stderr.strip().split("\n")[-1]
+                    log_callback(f"【相片編碼失敗】{item.file_name} -> 原因：{detail}")
+                return False
+            return True
 
         # 模式二：毛玻璃高斯模糊背景（兩階段預渲染架構）
         filter_complex = (
@@ -583,22 +659,20 @@ class VideoRenderEngine:
                 "-update", "1",
                 canvas_file,
             ]
-            res_canvas = subprocess.run(
-                cmd_canvas,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                startupinfo=startupinfo,
+            c_ret, c_out, c_err = self._run_command_cancellable(
+                cmd_canvas, startupinfo=startupinfo
             )
-            if res_canvas.returncode != 0 or not os.path.exists(canvas_file):
+            if self._is_cancelled:
+                return False
+
+            if c_ret != 0 or not os.path.exists(canvas_file):
                 if log_callback:
                     err_lines = [
                         line.strip()
-                        for line in res_canvas.stderr.split("\n")
+                        for line in c_err.split("\n")
                         if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
                     ]
-                    detail = err_lines[0] if err_lines else res_canvas.stderr.strip().split("\n")[-1]
+                    detail = err_lines[0] if err_lines else c_err.strip().split("\n")[-1]
                     log_callback(f"【畫布預渲染失敗】{item.file_name} -> 原因：{detail}")
                 return False
 
@@ -627,29 +701,23 @@ class VideoRenderEngine:
                 "-t", str(duration),
                 output_file,
             ]
-            res_encode = subprocess.run(
-                cmd_encode,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                startupinfo=startupinfo,
+            e_ret, e_out, e_err = self._run_command_cancellable(
+                cmd_encode, startupinfo=startupinfo
             )
-            if res_encode.returncode != 0:
+            if self._is_cancelled:
+                return False
+
+            if e_ret != 0:
                 if log_callback:
                     err_lines = [
                         line.strip()
-                        for line in res_encode.stderr.split("\n")
+                        for line in e_err.split("\n")
                         if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
                     ]
-                    detail = err_lines[0] if err_lines else res_encode.stderr.strip().split("\n")[-1]
+                    detail = err_lines[0] if err_lines else e_err.strip().split("\n")[-1]
                     log_callback(f"【相片編碼失敗】{item.file_name} -> 原因：{detail}")
                 return False
             return True
-        except Exception as e:
-            if log_callback:
-                log_callback(f"【相片渲染異常】{item.file_name} -> {e}")
-            return False
         finally:
             if os.path.exists(canvas_file):
                 try:
@@ -665,6 +733,9 @@ class VideoRenderEngine:
         log_callback,
     ) -> bool:
         """既有影片標準化渲染"""
+        if self._is_cancelled:
+            return False
+
         w, h = self.config.width, self.config.height
         fps = self.config.fps
 
@@ -701,27 +772,20 @@ class VideoRenderEngine:
             output_file,
         ]
 
-        try:
-            res = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                startupinfo=startupinfo,
-            )
-            if res.returncode != 0:
-                if log_callback:
-                    err_lines = [
-                        line.strip()
-                        for line in res.stderr.split("\n")
-                        if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
-                    ]
-                    detail = err_lines[0] if err_lines else res.stderr.strip().split("\n")[-1]
-                    log_callback(f"【影片渲染失敗】{item.file_name} -> 原因：{detail}")
-                return False
-            return True
-        except Exception as e:
-            if log_callback:
-                log_callback(f"【影片渲染異常】{item.file_name} -> {e}")
+        v_ret, v_out, v_err = self._run_command_cancellable(
+            cmd, startupinfo=startupinfo
+        )
+        if self._is_cancelled:
             return False
+
+        if v_ret != 0:
+            if log_callback:
+                err_lines = [
+                    line.strip()
+                    for line in v_err.split("\n")
+                    if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
+                ]
+                detail = err_lines[0] if err_lines else v_err.strip().split("\n")[-1]
+                log_callback(f"【影片渲染失敗】{item.file_name} -> 原因：{detail}")
+            return False
+        return True

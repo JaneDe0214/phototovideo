@@ -717,6 +717,8 @@ class MainWindow(QMainWindow):
         self.btn_open_folder.setEnabled(True)
         self.btn_select_root.setEnabled(True)
 
+        is_user_cancelled = self.worker and self.worker.engine._is_cancelled
+
         if success:
             self.progress_bar.setValue(100)
             self.lbl_progress_status.setText("完成！備份影片已全部合成。")
@@ -725,14 +727,25 @@ class MainWindow(QMainWindow):
                 "備份完成",
                 f"備份影片與對應的 YouTube 章節檔案已產生完畢！\n\n路徑：\n{self.last_output_dir}",
             )
+        elif is_user_cancelled:
+            self.progress_bar.setValue(0)
+            self.lbl_progress_status.setText("合成程序已手動終止，所有硬體資源已釋放。")
+            self._log("✓【終止完成】所有背景 FFmpeg 程序已全數秒殺退出，系統記憶體與硬體資源已完全釋放！")
+            QMessageBox.information(
+                self,
+                "任務已終止",
+                "合成程序已成功中止！\n所有背景運算程序已強制清理完畢，記憶體已完全釋放。",
+            )
         else:
-            self.lbl_progress_status.setText("處理失敗或已終止。")
+            self.lbl_progress_status.setText("處理失敗或異常中斷。")
             QMessageBox.critical(self, "錯誤", f"處理失敗：\n{message}")
 
     def _on_cancel_render(self):
         if self.worker and self.worker.isRunning():
+            self.btn_cancel.setEnabled(False)
+            self.lbl_progress_status.setText("正在強制中止所有渲染工作並釋放硬體資源...")
+            self._log("【終止】正在強制關閉所有背景轉碼程序，釋放 CPU/GPU/RAM...")
             self.worker.stop()
-            self._log("正在終止合成程序，請稍候...")
 
     def _on_open_folder(self):
         if self.last_output_dir and os.path.exists(self.last_output_dir):
