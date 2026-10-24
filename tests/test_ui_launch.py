@@ -25,6 +25,9 @@ def test_ui():
     print("MainWindow 實例建立成功。")
 
     # 驗證所有關鍵 UI 元件是否存在
+    assert hasattr(window, "tab_widget"), "缺少 tab_widget"
+    assert window.tab_widget.count() == 2, "TabWidget 應具有 2 個頁籤"
+    assert hasattr(window, "btn_add_to_queue"), "缺少 btn_add_to_queue"
     assert hasattr(window, "btn_select_root"), "缺少 btn_select_root"
     assert hasattr(window, "tree_widget"), "缺少 tree_widget"
     assert hasattr(window, "combo_profile"), "缺少 combo_profile"
@@ -34,7 +37,11 @@ def test_ui():
     assert hasattr(window, "btn_browse_out"), "缺少 btn_browse_out"
     assert hasattr(window, "btn_start"), "缺少 btn_start"
     assert hasattr(window, "progress_bar"), "缺少 progress_bar"
-    print("所有核心 UI 元件屬性檢查通過。")
+    assert hasattr(window, "queue_table"), "缺少 queue_table"
+    assert hasattr(window, "btn_queue_start"), "缺少 btn_queue_start"
+    assert hasattr(window, "btn_queue_pause"), "缺少 btn_queue_pause"
+    assert hasattr(window, "chk_auto_shutdown"), "缺少 chk_auto_shutdown"
+    print("所有核心 UI 元件（包含批次佇列與分頁）屬性檢查通過。")
 
     # 測試自訂輸出路徑勾選切換
     window.chk_custom_out.setChecked(True)

@@ -170,4 +170,53 @@ QScrollBar::handle:vertical {
 QScrollBar::handle:vertical:hover {
     background: #6a6a7a;
 }
+
+QTabWidget::pane {
+    border: 1px solid #33333f;
+    background-color: #1e1e24;
+    border-radius: 6px;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #252530;
+    color: #a0a0ab;
+    padding: 10px 22px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 4px;
+    font-weight: bold;
+    font-size: 13px;
+    border: 1px solid #33333f;
+    border-bottom: none;
+}
+
+QTabBar::tab:selected {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0078d4, stop:1 #00a8cc);
+    color: #ffffff;
+    border-color: #00d2ff;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #323240;
+    color: #00d2ff;
+}
+
+QTableWidget {
+    background-color: #141418;
+    border: 1px solid #33333f;
+    border-radius: 6px;
+    color: #f0f0f2;
+    gridline-color: #252530;
+}
+
+QTableWidget::item {
+    padding: 6px;
+    border-bottom: 1px solid #202028;
+}
+
+QTableWidget::item:selected {
+    background-color: #0078d4;
+    color: #ffffff;
+}
 """

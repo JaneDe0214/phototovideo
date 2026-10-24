@@ -414,11 +414,13 @@ class VideoRenderEngine:
         progress_callback: Optional[Callable[[int, int, str], None]],
         log_callback: Optional[Callable[[str], None]],
     ) -> bool:
-        """渲染單一個 Part 影片"""
+        """渲染單一個 Part 影片（支援斷點續傳快取與自動空間釋放）"""
         os.makedirs(os.path.dirname(os.path.abspath(output_video_path)), exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(output_video_path))[0]
+        # 建立確定性快取目錄（關機或暫停重啟後可精準斷點接續）
         temp_dir = os.path.join(
             os.path.dirname(os.path.abspath(output_video_path)),
-            f"_temp_render_p{part_index}_{int(time.time())}",
+            f".cache_{base_name}_p{part_index}",
         )
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -426,6 +428,7 @@ class VideoRenderEngine:
         current_time_sec = 0.0
         segment_files: List[str] = []
         total_items = len(part_media)
+        is_render_success = False
 
         try:
             startupinfo = None
@@ -451,15 +454,34 @@ class VideoRenderEngine:
                 seg_output = os.path.join(temp_dir, f"seg_{idx:05d}.mp4")
                 tasks.append((idx, item, seg_output, dur))
 
-            # 2. 多執行緒平行算圖（充分榨乾 CPU 多核心與 GPU 雙多媒體引擎）
-            completed_count = 0
-            lock = threading.Lock()
-            start_time = time.time()
+            # 斷點續傳檢測：檢查上次中斷留下的完整有效快取片段
+            cached_tasks = []
+            pending_tasks = []
+            for t in tasks:
+                idx, item, seg_output, dur = t
+                if os.path.exists(seg_output) and os.path.getsize(seg_output) > 1000:
+                    cached_tasks.append(t)
+                else:
+                    pending_tasks.append(t)
+
+            cached_count = len(cached_tasks)
             part_prefix = f"[Part {part_index}/{total_parts}] " if total_parts > 1 else ""
 
-            if log_callback:
+            if cached_count > 0 and log_callback:
                 log_callback(
-                    f"[平行加速] 啟動多工平行渲染引擎：同時啟用 {self.config.concurrency} 個執行緒加速處理..."
+                    f"⚡【斷點續傳生效】偵測到上次中斷之進度快取！自動載入已完成之 {cached_count}/{total_items} 個項目，"
+                    f"直接接續處理剩餘 {len(pending_tasks)} 個項目！"
+                )
+
+            completed_count = cached_count
+            lock = threading.Lock()
+            start_time = time.time()
+
+            if progress_callback and cached_count > 0:
+                progress_callback(
+                    completed_count,
+                    total_items,
+                    f"{part_prefix}斷點接續中 ({completed_count}/{total_items}) - 命中快取 {cached_count} 項",
                 )
 
             def _worker_task(task_info):
@@ -481,39 +503,45 @@ class VideoRenderEngine:
                         log_callback(f"【渲染程序異常】{item.file_name} -> {str(ex)}")
                     return False, idx
 
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.concurrency)
-            try:
-                future_to_task = {executor.submit(_worker_task, t): t for t in tasks}
-                for future in concurrent.futures.as_completed(future_to_task):
-                    if self._is_cancelled:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return False
+            # 2. 僅對未完成的項目進行多執行緒平行算圖
+            if pending_tasks:
+                if log_callback:
+                    log_callback(
+                        f"[平行加速] 啟動多工平行渲染引擎：同時啟用 {self.config.concurrency} 個執行緒加速處理剩餘項目..."
+                    )
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.concurrency)
+                try:
+                    future_to_task = {executor.submit(_worker_task, t): t for t in pending_tasks}
+                    for future in concurrent.futures.as_completed(future_to_task):
+                        if self._is_cancelled:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return False
 
-                    try:
-                        ok, idx = future.result()
-                    except Exception:
-                        ok = False
+                        try:
+                            ok, idx = future.result()
+                        except Exception:
+                            ok = False
 
-                    if self._is_cancelled:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return False
+                        if self._is_cancelled:
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return False
 
-                    with lock:
-                        completed_count += 1
-                        elapsed = time.time() - start_time
-                        speed = completed_count / max(elapsed, 0.1)
-                        remain_items = total_items - completed_count
-                        eta_sec = int(remain_items / max(speed, 0.01))
-                        eta_str = f"{eta_sec // 60}分{eta_sec % 60}秒" if eta_sec >= 60 else f"{eta_sec}秒"
+                        with lock:
+                            completed_count += 1
+                            elapsed = time.time() - start_time
+                            speed = (completed_count - cached_count) / max(elapsed, 0.1)
+                            remain_items = total_items - completed_count
+                            eta_sec = int(remain_items / max(speed, 0.01))
+                            eta_str = f"{eta_sec // 60}分{eta_sec % 60}秒" if eta_sec >= 60 else f"{eta_sec}秒"
 
-                        if progress_callback:
-                            progress_callback(
-                                completed_count,
-                                total_items,
-                                f"{part_prefix}平行加速中 ({completed_count}/{total_items}) - 速度: {speed:.1f} 項/秒 (預估剩餘: {eta_str})",
-                            )
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+                            if progress_callback:
+                                progress_callback(
+                                    completed_count,
+                                    total_items,
+                                    f"{part_prefix}平行加速中 ({completed_count}/{total_items}) - 速度: {speed:.1f} 項/秒 (預估剩餘: {eta_str})",
+                                )
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
 
             if self._is_cancelled:
                 return False
@@ -571,15 +599,60 @@ class VideoRenderEngine:
                     log_callback(f"【合併錯誤】{process.stderr}")
                 return False
 
+            if not os.path.exists(output_video_path) or os.path.getsize(output_video_path) < 1000:
+                if log_callback:
+                    log_callback(f"【嚴重錯誤】輸出檔案大小異常或未生成：{output_video_path}")
+                return False
+
+            is_render_success = True
             if log_callback:
                 log_callback(f"[完成] 影片已成功產出：{output_video_path}\n")
+                log_callback(f"🧹【空間釋放】影片封裝完成，已自動清除暫存快取目錄，100% 釋出磁碟空間！")
             return True
 
         finally:
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
+            if is_render_success:
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            else:
+                # 任務中斷或暫停時，安全保留快取供下次斷點接續
+                if log_callback and os.path.exists(temp_dir):
+                    log_callback(
+                        f"💾【進度保留】任務已暫停或中斷，已完成之進度快取已安全保留於：\n"
+                        f"   {temp_dir}\n"
+                        f"   下次啟動同一任務將自動從斷點無縫接續！"
+                    )
+
+    @staticmethod
+    def clean_cache_directories(directory: str) -> Tuple[int, float]:
+        """
+        掃描並刪除指定目錄下所有 .cache_* 與 _temp_render_* 殘留暫存資料夾。
+        回傳：(清理的資料夾數量, 釋放的總 MB 數)
+        """
+        if not directory or not os.path.exists(directory):
+            return 0, 0.0
+
+        cleaned_count = 0
+        freed_bytes = 0
+
+        try:
+            for item in os.listdir(directory):
+                full_path = os.path.join(directory, item)
+                if os.path.isdir(full_path) and (item.startswith(".cache_") or item.startswith("_temp_render_")):
+                    for root, _, files in os.walk(full_path):
+                        for f in files:
+                            try:
+                                freed_bytes += os.path.getsize(os.path.join(root, f))
+                            except Exception:
+                                pass
+                    shutil.rmtree(full_path, ignore_errors=True)
+                    cleaned_count += 1
+        except Exception:
+            pass
+
+        return cleaned_count, freed_bytes / (1024 * 1024)
 
     def _build_image_encode_cmd(
         self,
