@@ -30,7 +30,7 @@ class RenderConfig:
         maxrate: str = "260M",
         bufsize: str = "480M",
         image_duration: float = 3.0,       # 照片停留秒數
-        fill_mode: str = "blur",           # 'blur' (毛玻璃) 或 'black' (黑邊)
+        fill_mode: str = "black",          # 預設 'black' (純黑邊留白，極速無損，最忠於原作)
         show_watermark: bool = True,       # 是否在角落顯示微小檔名與時間
         audio_bitrate: str = "512k",       # 最高規格 512 kbps 立體聲
         audio_samplerate: int = 48000,     # 48 kHz 高解析度取樣率
