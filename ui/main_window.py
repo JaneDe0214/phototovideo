@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
 
         self._init_ui()
         self._check_environment()
+        self._update_stats_estimate()
 
     def _init_ui(self):
         main_widget = QWidget()
@@ -156,6 +157,45 @@ class MainWindow(QMainWindow):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
+
+        # ⚡ 硬體加速支援儀表板群組
+        group_hw = QGroupBox("⚡ 本電腦實體硬體加速支援儀表板（動態實測）")
+        hw_layout = QVBoxLayout(group_hw)
+        hw_layout.setSpacing(4)
+
+        hw_summary = self.hardware_detector.get_hardware_status_summary()
+
+        # Intel QSV 燈號
+        qsv = hw_summary["qsv"]
+        lbl_qsv = QLabel(f"{'🟢' if qsv['light'] == 'green' else '⚪'} <b>{qsv['label']}</b>：{qsv['desc']}")
+        lbl_qsv.setStyleSheet("color: #dcdce0; font-size: 12px;")
+        hw_layout.addWidget(lbl_qsv)
+
+        # NVIDIA NVENC 燈號
+        nv = hw_summary["nvenc"]
+        lbl_nv = QLabel(f"{'🟢' if nv['light'] == 'green' else '⚪'} <b>{nv['label']}</b>：{nv['desc']}")
+        lbl_nv.setStyleSheet("color: #dcdce0; font-size: 12px;")
+        hw_layout.addWidget(lbl_nv)
+
+        # AMD AMF 燈號
+        amf = hw_summary["amf"]
+        lbl_amf = QLabel(f"{'🟢' if amf['light'] == 'green' else '⚪'} <b>{amf['label']}</b>：{amf['desc']}")
+        lbl_amf.setStyleSheet("color: #dcdce0; font-size: 12px;")
+        hw_layout.addWidget(lbl_amf)
+
+        # CPU 燈號
+        cpu = hw_summary["cpu"]
+        lbl_cpu = QLabel(f"🟢 <b>{cpu['label']}</b>：{cpu['desc']}")
+        lbl_cpu.setStyleSheet("color: #dcdce0; font-size: 12px;")
+        hw_layout.addWidget(lbl_cpu)
+
+        # 目前選定的加速模式燈號
+        self.lbl_active_hw_status = QLabel("🎯 目前選取設定：偵測中...")
+        self.lbl_active_hw_status.setStyleSheet(
+            "color: #00f2fe; font-weight: bold; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed #3d3d4a;"
+        )
+        hw_layout.addWidget(self.lbl_active_hw_status)
+        right_layout.addWidget(group_hw)
 
         # 輸出畫質規格群組
         group_specs = QGroupBox("🚀 輸出畫質與規格設定（YouTube 最高箱子概念）")
@@ -352,9 +392,14 @@ class MainWindow(QMainWindow):
             self._log("【警訊】系統尚未找到 FFmpeg 可執行檔，請確認安裝。")
         else:
             self._log(f"[就緒] FFmpeg 核心版本已載入 ({ffmpeg_bin})")
-            if self.hardware_detector.available_encoders:
-                encoders_str = ", ".join(self.hardware_detector.available_encoders)
-                self._log(f"[就緒] 偵測到支援的硬體/軟體編碼器：{encoders_str}")
+            hw_summary = self.hardware_detector.get_hardware_status_summary()
+            self._log("--------------------------------------------------")
+            self._log("【本電腦實體硬體加速探測結果（動態實測）】")
+            for k, info in hw_summary.items():
+                mark = "[支援 🟢]" if info["light"] == "green" else "[無硬體 ⚪]"
+                self._log(f"  {mark} {info['label']} -> {info['desc']}")
+            self._log("--------------------------------------------------")
+            self._log("已自動為您預選本電腦真正支援的最佳最高畫質設定檔！\n")
 
     def _log(self, text: str):
         self.txt_log.append(text)
@@ -407,6 +452,22 @@ class MainWindow(QMainWindow):
         self._update_stats_estimate()
 
     def _update_stats_estimate(self):
+        # 即時更新當前選取設定檔之硬體加速狀態燈號
+        current_prof_id = self.combo_profile.currentData()
+        prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
+        hw_type = prof.get("hw_type", "硬體加速")
+        is_cpu = "CPU" in hw_type
+        if is_cpu:
+            self.lbl_active_hw_status.setText(f"🎯 目前選取：🟡【{hw_type} 軟體計算中（視覺無損/耗時較長）】")
+            self.lbl_active_hw_status.setStyleSheet(
+                "color: #ffd166; font-weight: bold; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed #3d3d4a;"
+            )
+        else:
+            self.lbl_active_hw_status.setText(f"🎯 目前選取：🟢【{hw_type} 硬體極速加速中（速度最快）】")
+            self.lbl_active_hw_status.setStyleSheet(
+                "color: #06d6a0; font-weight: bold; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed #3d3d4a;"
+            )
+
         if not self.selected_start_node:
             return
 

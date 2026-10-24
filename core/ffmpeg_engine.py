@@ -3,6 +3,7 @@ FFmpeg 8K/4K 極致品質影片渲染引擎
 支援智慧毛玻璃填充、Lanczos 頂級縮放、48kHz 512kbps 最高音訊規格、
 GOP 關鍵影格強制插入（確保截圖零失真）、分段快取與無損 Concat 合成。
 支援 YouTube 官方 12 小時 / 256GB 限制智慧自動分段（Multi-Part Splitting）。
+內建「智慧排錯與無縫硬體降級引擎（Smart Fallback Engine）」，絕不盲目報錯中斷！
 """
 
 import os
@@ -99,13 +100,10 @@ class VideoRenderEngine:
     def split_media_into_parts(
         self, media_list: List[Tuple[MediaItem, str]]
     ) -> List[List[Tuple[MediaItem, str]]]:
-        """
-        依據 YouTube 官方限制（12 小時 / 256GB 安全線）將媒體清單自動切分為多個 Part
-        """
+        """依據 YouTube 官方限制（12 小時 / 256GB 安全線）將媒體清單自動切分為多個 Part"""
         if not self.config.enable_auto_split:
             return [media_list]
 
-        # 換算位元率為每秒 GB 數
         bitrate_num = int(self.config.bitrate.replace("M", "").replace("k", ""))
         if "k" in self.config.bitrate:
             gb_per_sec = (bitrate_num / (8 * 1024 * 1024))
@@ -125,7 +123,6 @@ class VideoRenderEngine:
 
             est_item_size_gb = dur * gb_per_sec
 
-            # 檢查加入此項目是否會超過安全線（且當前 part 至少已有 1 個項目）
             would_exceed_dur = (current_part_duration + dur) > self.config.max_duration_seconds
             would_exceed_size = (current_part_size_gb + est_item_size_gb) > self.config.max_size_gb
 
@@ -144,6 +141,112 @@ class VideoRenderEngine:
 
         return parts
 
+    def _preflight_check_and_fallback(
+        self, first_item: MediaItem, log_callback: Optional[Callable[[str], None]]
+    ) -> bool:
+        """
+        在開始大量轉碼前，進行 Pre-flight 試跑測試。
+        若所選的編碼器在當前電腦硬體上失敗，自動智慧排錯並無縫降級至相容編碼器！
+        """
+        temp_test_output = os.path.join(
+            os.environ.get("TEMP", "."), f"_hw_probe_test_{int(time.time())}.mp4"
+        )
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        test_duration = 0.1
+        success, err_msg = self._test_single_render(
+            first_item, temp_test_output, test_duration, startupinfo
+        )
+        if os.path.exists(temp_test_output):
+            try:
+                os.remove(temp_test_output)
+            except Exception:
+                pass
+
+        if success:
+            return True
+
+        # 若失敗，啟動智慧排錯
+        orig_codec = self.config.vcodec
+        if log_callback:
+            log_callback(
+                f"【智慧排錯】偵測到所選編碼器『{orig_codec}』無法在當前硬體執行！\n"
+                f"  錯誤原因：{err_msg}\n"
+                f"  正在為您自動搜尋本機相容之最佳替代編碼器..."
+            )
+
+        # 備用候選清單（依優先順序）
+        fallback_candidates = ["hevc_qsv", "hevc_nvenc", "hevc_amf", "libx265", "libx264"]
+        for candidate in fallback_candidates:
+            if candidate == orig_codec:
+                continue
+
+            self.config.vcodec = candidate
+            c_success, c_err = self._test_single_render(
+                first_item, temp_test_output, test_duration, startupinfo
+            )
+            if os.path.exists(temp_test_output):
+                try:
+                    os.remove(temp_test_output)
+                except Exception:
+                    pass
+
+            if c_success:
+                hw_name = "Intel QSV HEVC 硬體加速" if candidate == "hevc_qsv" else candidate
+                if log_callback:
+                    log_callback(
+                        f"✓【智慧排錯成功】已為您自動無縫切換至：『{candidate}』({hw_name})！\n"
+                        f"  系統將以此相容配置繼續執行，避免任務中斷。\n"
+                    )
+                return True
+
+        if log_callback:
+            log_callback("【嚴重錯誤】所有備用編碼器均測試失敗，無法執行渲染。")
+        return False
+
+    def _test_single_render(
+        self, item: MediaItem, output_file: str, duration: float, startupinfo
+    ) -> Tuple[bool, str]:
+        """試跑渲染測試"""
+        w, h = 640, 360  # 測試用低解析度快速驗證
+        cmd = [
+            self.ffmpeg_path,
+            "-y",
+            "-loop", "1",
+            "-t", str(duration),
+            "-i", item.file_path,
+            "-f", "lavfi",
+            "-t", str(duration),
+            "-i", f"anullsrc=r=48000:cl=stereo",
+            "-vf", f"scale={w}:{h}",
+            "-c:v", self.config.vcodec,
+            "-c:a", "aac",
+            "-t", str(duration),
+            output_file,
+        ]
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=startupinfo,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                return True, "成功"
+            err = res.stderr.strip()
+            for line in err.split("\n"):
+                if "unsupported" in line.lower() or "error" in line.lower() or "failed" in line.lower():
+                    return False, line.strip()
+            return False, err.split("\n")[-1] if err else "未知錯誤"
+        except Exception as e:
+            return False, str(e)
+
     def render_album_to_video(
         self,
         media_list: List[Tuple[MediaItem, str]],
@@ -153,9 +256,7 @@ class VideoRenderEngine:
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        """
-        自動分段批次渲染輸出。若超過限制則自動生成 Part 1, Part 2 等多部影片。
-        """
+        """自動分段批次渲染輸出"""
         if not self.ffmpeg_path or not os.path.exists(self.ffmpeg_path):
             if log_callback:
                 log_callback("【錯誤】未找到 FFmpeg 核心程式！請先確認安裝。")
@@ -164,6 +265,12 @@ class VideoRenderEngine:
         self._is_cancelled = False
         parts = self.split_media_into_parts(media_list)
         total_parts = len(parts)
+
+        # 執行 Pre-flight 試跑與智慧排錯
+        if media_list:
+            first_item = media_list[0][0]
+            if not self._preflight_check_and_fallback(first_item, log_callback):
+                return False
 
         if log_callback:
             if total_parts > 1:
@@ -180,7 +287,6 @@ class VideoRenderEngine:
                     log_callback("【任務已取消】使用者終止了處理程序。")
                 return False
 
-            # 計算輸出檔案名稱
             if total_parts > 1:
                 base_dir = os.path.dirname(os.path.abspath(base_output_video_path))
                 video_name, video_ext = os.path.splitext(os.path.basename(base_output_video_path))
@@ -200,6 +306,7 @@ class VideoRenderEngine:
                     f"==================================================\n"
                     f"[處理中] 開始處理第 {part_idx}/{total_parts} 部影片：『{part_title}』\n"
                     f"本段收錄項目：{len(part_media)} 個媒體檔案\n"
+                    f"使用編碼器：{self.config.vcodec} ({self.config.resolution} @ {self.config.fps}fps)\n"
                     f"=================================================="
                 )
 
@@ -290,8 +397,6 @@ class VideoRenderEngine:
                     )
 
                 if not success:
-                    if log_callback:
-                        log_callback(f"【警告】項目 {item_filename} 渲染失敗，跳過繼續。")
                     continue
 
                 segment_files.append(seg_output)
@@ -301,12 +406,10 @@ class VideoRenderEngine:
                     log_callback("【錯誤】本段無有效渲染片段。")
                 return False
 
-            # 產生 YouTube 章節檔案
             chapter_gen.save_to_file(output_chapter_path)
             if log_callback:
                 log_callback(f"[OK] YouTube 章節索引檔案已建立：{output_chapter_path}")
 
-            # 合併所有片段為單一巨大影片
             if progress_callback:
                 progress_callback(total_items, total_items, f"{part_prefix}正在進行無損極速封裝合併...")
             if log_callback:
@@ -361,13 +464,7 @@ class VideoRenderEngine:
         startupinfo,
         log_callback,
     ) -> bool:
-        """
-        將單張相片渲染為標準規格的 8K/4K 60fps 獨立片段：
-        - 採用 Lanczos 頂級縮放演算法
-        - 智慧毛玻璃模糊背景
-        - 自動注入 48kHz 512kbps 靜音軌
-        - 強制插入 IDR 關鍵幀（截圖最少失真化）
-        """
+        """單張相片渲染"""
         w, h = self.config.width, self.config.height
         fps = self.config.fps
 
@@ -420,10 +517,21 @@ class VideoRenderEngine:
                 errors="ignore",
                 startupinfo=startupinfo,
             )
-            return res.returncode == 0
+            if res.returncode != 0:
+                if log_callback:
+                    # 擷取關鍵錯誤
+                    err_lines = [
+                        line.strip()
+                        for line in res.stderr.split("\n")
+                        if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
+                    ]
+                    detail = err_lines[0] if err_lines else res.stderr.strip().split("\n")[-1]
+                    log_callback(f"【照片渲染失敗】{item.file_name} -> 原因：{detail}")
+                return False
+            return True
         except Exception as e:
             if log_callback:
-                log_callback(f"照片渲染異常：{e}")
+                log_callback(f"【照片渲染異常】{item.file_name} -> {e}")
             return False
 
     def _render_video_segment(
@@ -433,9 +541,7 @@ class VideoRenderEngine:
         startupinfo,
         log_callback,
     ) -> bool:
-        """
-        將一段既有影片標準化為相同的 8K/4K 60fps 格式，音訊標準化為 48kHz AAC
-        """
+        """既有影片標準化渲染"""
         w, h = self.config.width, self.config.height
         fps = self.config.fps
 
@@ -481,8 +587,18 @@ class VideoRenderEngine:
                 errors="ignore",
                 startupinfo=startupinfo,
             )
-            return res.returncode == 0
+            if res.returncode != 0:
+                if log_callback:
+                    err_lines = [
+                        line.strip()
+                        for line in res.stderr.split("\n")
+                        if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
+                    ]
+                    detail = err_lines[0] if err_lines else res.stderr.strip().split("\n")[-1]
+                    log_callback(f"【影片渲染失敗】{item.file_name} -> 原因：{detail}")
+                return False
+            return True
         except Exception as e:
             if log_callback:
-                log_callback(f"影片渲染異常：{e}")
+                log_callback(f"【影片渲染異常】{item.file_name} -> {e}")
             return False
