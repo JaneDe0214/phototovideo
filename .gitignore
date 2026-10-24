@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+_temp_render_*
+*.mp4
+*.mkv
+bin/ffmpeg.exe
+bin/ffprobe.exe
+.vscode/
+.idea/
