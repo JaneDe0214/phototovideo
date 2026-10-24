@@ -6,9 +6,11 @@ GOP 關鍵影格強制插入（確保截圖零失真）、分段快取與無損 
 內建「智慧排錯與無縫硬體降級引擎（Smart Fallback Engine）」，絕不盲目報錯中斷！
 """
 
+import concurrent.futures
 import os
 import shutil
 import subprocess
+import threading
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 from core.chapter_generator import ChapterGenerator
@@ -35,6 +37,7 @@ class RenderConfig:
         enable_auto_split: bool = True,    # 啟用 YouTube 限制自動分段
         max_duration_seconds: float = 42000.0,  # 11 小時 40 分 (YT 12h 安全線)
         max_size_gb: float = 240.0,             # 240 GB (YT 256GB 安全線)
+        concurrency: int = 4,              # 多工平行執行緒數 (充分榨乾 CPU 與雙 MFX 引擎)
     ):
         self.resolution = resolution
         self.width, self.height = map(int, resolution.split("x"))
@@ -51,6 +54,7 @@ class RenderConfig:
         self.enable_auto_split = enable_auto_split
         self.max_duration_seconds = max_duration_seconds
         self.max_size_gb = max_size_gb
+        self.concurrency = max(1, concurrency)
 
 
 class VideoRenderEngine:
@@ -360,46 +364,72 @@ class VideoRenderEngine:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+            # 1. 預先建立時間軸與工作任務清單（確保章節時間 100% 精準）
+            tasks = []
             for idx, (item, rel_dir) in enumerate(part_media):
-                if self._is_cancelled:
-                    return False
-
                 item_filename = item.file_name
                 chapter_gen.add_entry(current_time_sec, item_filename, rel_dir)
-                seg_output = os.path.join(temp_dir, f"seg_{idx:05d}.mp4")
-
-                part_prefix = f"[Part {part_index}/{total_parts}] " if total_parts > 1 else ""
-
                 if item.is_image:
-                    item_duration = self.config.image_duration
-                    current_time_sec += item_duration
-                    if progress_callback:
-                        progress_callback(
-                            idx + 1,
-                            total_items,
-                            f"{part_prefix}處理照片 ({idx + 1}/{total_items})：{item_filename}",
-                        )
-                    success = self._render_image_segment(
-                        item, seg_output, item_duration, startupinfo, log_callback
+                    dur = self.config.image_duration
+                else:
+                    dur = max(self._get_video_duration(item.file_path), 0.5)
+                current_time_sec += dur
+                seg_output = os.path.join(temp_dir, f"seg_{idx:05d}.mp4")
+                tasks.append((idx, item, seg_output, dur))
+
+            # 2. 多執行緒平行算圖（充分榨乾 CPU 多核心與 GPU 雙多媒體引擎）
+            completed_count = 0
+            lock = threading.Lock()
+            start_time = time.time()
+            part_prefix = f"[Part {part_index}/{total_parts}] " if total_parts > 1 else ""
+
+            if log_callback:
+                log_callback(
+                    f"[平行加速] 啟動多工平行渲染引擎：同時啟用 {self.config.concurrency} 個執行緒加速處理..."
+                )
+
+            def _worker_task(task_info):
+                if self._is_cancelled:
+                    return False, task_info[0]
+                idx, item, seg_output, dur = task_info
+                if item.is_image:
+                    ok = self._render_image_segment(
+                        item, seg_output, dur, startupinfo, log_callback
                     )
                 else:
-                    vid_dur = self._get_video_duration(item.file_path)
-                    item_duration = max(vid_dur, 0.5)
-                    current_time_sec += item_duration
-                    if progress_callback:
-                        progress_callback(
-                            idx + 1,
-                            total_items,
-                            f"{part_prefix}處理影片 ({idx + 1}/{total_items})：{item_filename}",
-                        )
-                    success = self._render_video_segment(
+                    ok = self._render_video_segment(
                         item, seg_output, startupinfo, log_callback
                     )
+                return ok, idx
 
-                if not success:
-                    continue
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config.concurrency) as executor:
+                future_to_task = {executor.submit(_worker_task, t): t for t in tasks}
+                for future in concurrent.futures.as_completed(future_to_task):
+                    if self._is_cancelled:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return False
 
-                segment_files.append(seg_output)
+                    ok, idx = future.result()
+                    with lock:
+                        completed_count += 1
+                        elapsed = time.time() - start_time
+                        speed = completed_count / max(elapsed, 0.1)
+                        remain_items = total_items - completed_count
+                        eta_sec = int(remain_items / max(speed, 0.01))
+                        eta_str = f"{eta_sec // 60}分{eta_sec % 60}秒" if eta_sec >= 60 else f"{eta_sec}秒"
+
+                        if progress_callback:
+                            progress_callback(
+                                completed_count,
+                                total_items,
+                                f"{part_prefix}平行加速中 ({completed_count}/{total_items}) - 速度: {speed:.1f} 項/秒 (預估剩餘: {eta_str})",
+                            )
+
+            # 3. 循序收集已成功產生的片段檔案（嚴格確保播放順序零錯亂）
+            for idx in range(total_items):
+                seg_path = os.path.join(temp_dir, f"seg_{idx:05d}.mp4")
+                if os.path.exists(seg_path) and os.path.getsize(seg_path) > 0:
+                    segment_files.append(seg_path)
 
             if not segment_files:
                 if log_callback:

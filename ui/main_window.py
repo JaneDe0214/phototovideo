@@ -232,6 +232,29 @@ class MainWindow(QMainWindow):
         row_fill.addWidget(self.combo_fill)
         specs_layout.addLayout(row_fill)
 
+        # ⚡ 多工平行處理加速設定
+        cpu_count = os.cpu_count() or 4
+        default_concurrency = 8 if cpu_count >= 16 else (4 if cpu_count >= 8 else 2)
+
+        row_concur = QHBoxLayout()
+        lbl_concur = QLabel(f"⚡ 平行處理加速（偵測到 {cpu_count} 核心）：")
+        self.combo_concurrency = QComboBox()
+        self.combo_concurrency.addItem(f"8 緒平行加速 (推薦，充分餵飽 GPU 雙引擎)", 8)
+        self.combo_concurrency.addItem(f"4 緒平行加速 (均衡順暢)", 4)
+        self.combo_concurrency.addItem(f"12 緒平行加速 (極速狂飆，適合 20+ 核心 CPU)", 12)
+        self.combo_concurrency.addItem(f"16 緒極限加速", 16)
+        self.combo_concurrency.addItem(f"1 緒 (單工除錯模式)", 1)
+
+        # 設定預設選中
+        for i in range(self.combo_concurrency.count()):
+            if self.combo_concurrency.itemData(i) == default_concurrency:
+                self.combo_concurrency.setCurrentIndex(i)
+                break
+
+        row_concur.addWidget(lbl_concur)
+        row_concur.addWidget(self.combo_concurrency)
+        specs_layout.addLayout(row_concur)
+
         # 音訊設定說明
         lbl_audio_info = QLabel("🎵 音訊規格：AAC 512 kbps @ 48,000 Hz（YouTube 立體聲最高極限）")
         lbl_audio_info.setStyleSheet("color: #70d6ff; font-size: 12px;")
@@ -567,6 +590,7 @@ class MainWindow(QMainWindow):
             enable_auto_split=self.chk_auto_split.isChecked(),
             max_duration_seconds=float(self.combo_max_dur.currentData()),
             max_size_gb=float(self.combo_max_size.currentData()),
+            concurrency=int(self.combo_concurrency.currentData()),
         )
 
         self.last_output_dir = out_dir
