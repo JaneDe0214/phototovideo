@@ -373,11 +373,14 @@ def calculate_safe_concurrency(total_ram_gb: float, is_8k: bool, max_cores: int)
     safe_available = max(total_ram_gb - system_reserved_gb, 4.0)
     per_proc_ram = 1.8 if is_8k else 0.4
 
-    # 8K 下額外保守安全因子（防止突發性畫布與快取尖峰），建議不超過安全上限的 70%
+    # 8K 下受到 GPU 專用顯存與雙硬體編碼通道限制，為避免觸發 [av1_qsv] Error allocating output packet，
+    # 32G 以下筆電安全上限精準收斂在 4~6 緒（最佳甜蜜點，既飽和 GPU 雙 MFX 又完全不爭搶顯存封包）；
+    # 64G 以上高階桌機與工作站則按記憶體彈性放寬平行度。
     if is_8k:
-        safe_concur = int((safe_available / per_proc_ram) * 0.7)
-        # 32GB RAM 下建議 4~6 緒，16GB 下建議 2~3 緒，64GB+ 建議 12~16 緒
-        safe_concur = max(2, min(safe_concur, 16))
+        safe_ratio = 0.42 if total_ram_gb <= 32.0 else 0.7
+        safe_concur = int((safe_available / per_proc_ram) * safe_ratio)
+        max_8k_cap = 6 if total_ram_gb <= 32.0 else 24
+        safe_concur = max(2, min(safe_concur, max_8k_cap))
     else:
         safe_concur = int(safe_available / per_proc_ram)
         safe_concur = max(4, min(safe_concur, 16))
