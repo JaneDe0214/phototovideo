@@ -437,7 +437,12 @@ class VideoRenderEngine:
             tasks = []
             for idx, (item, rel_dir) in enumerate(part_media):
                 item_filename = item.file_name
-                chapter_gen.add_entry(current_time_sec, item_filename, rel_dir)
+                chapter_gen.add_entry(
+                    current_time_sec,
+                    item_filename,
+                    rel_dir,
+                    is_video=not item.is_image,
+                )
                 if item.is_image:
                     dur = self.config.image_duration
                 else:
@@ -519,9 +524,11 @@ class VideoRenderEngine:
                     log_callback("【錯誤】本段無有效渲染片段。")
                 return False
 
-            chapter_gen.save_to_file(output_chapter_path)
+            full_chap_path = chapter_gen.save_to_file(output_chapter_path)
             if log_callback:
-                log_callback(f"[OK] YouTube 章節索引檔案已建立：{output_chapter_path}")
+                log_callback(f"[OK] YouTube 5,000 字精選章節索引已建立：{output_chapter_path}")
+                if full_chap_path:
+                    log_callback(f"[備忘] 本機完整無刪減章節索引已同步建立：{full_chap_path}")
 
             if progress_callback:
                 progress_callback(total_items, total_items, f"{part_prefix}正在進行無損極速封裝合併...")
