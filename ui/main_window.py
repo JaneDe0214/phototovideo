@@ -1,6 +1,7 @@
 """
 主視窗介面模組
 提供樹狀目錄瀏覽、起點節點選擇、8K/4K 最高規格參數設定、
+YouTube 12 小時 / 256GB 限制智慧自動分段保護、
 即時進度監控與 YouTube 章節生成控制。
 """
 
@@ -9,6 +10,7 @@ import subprocess
 from typing import Optional
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGroupBox,
@@ -84,7 +86,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("相簿轉 8K/4K YouTube 極致備份影片合成工具")
-        self.resize(1180, 780)
+        self.resize(1200, 800)
 
         self.root_node: Optional[DirectoryTreeNode] = None
         self.selected_start_node: Optional[DirectoryTreeNode] = None
@@ -137,12 +139,14 @@ class MainWindow(QMainWindow):
         self.lbl_stat_target = QLabel("起點目標：尚未選取")
         self.lbl_stat_counts = QLabel("包含媒體：相片 0 張 / 影片 0 支")
         self.lbl_stat_est_duration = QLabel("預估總時長：0 秒")
-        self.lbl_stat_est_size = QLabel("預估輸出大小：0 GB (YouTube 限制: < 256GB)")
+        self.lbl_stat_est_size = QLabel("預估總容量：0 GB")
+        self.lbl_stat_split_info = QLabel("分段狀態：-")
         self.lbl_stat_target.setStyleSheet("font-weight: bold; color: #ffffff;")
         stats_layout.addWidget(self.lbl_stat_target)
         stats_layout.addWidget(self.lbl_stat_counts)
         stats_layout.addWidget(self.lbl_stat_est_duration)
         stats_layout.addWidget(self.lbl_stat_est_size)
+        stats_layout.addWidget(self.lbl_stat_split_info)
         left_layout.addWidget(self.group_stats)
 
         splitter.addWidget(left_widget)
@@ -193,14 +197,46 @@ class MainWindow(QMainWindow):
         specs_layout.addWidget(lbl_audio_info)
 
         # 截圖最少失真保證說明
-        lbl_lossless_info = QLabel("✨ 截圖無失真保證：啟用 Lanczos 頂級銳利縮放 ＋ 強制插入 IDR 關鍵幀")
+        lbl_lossless_info = QLabel("✨ 截圖無失真保證：Lanczos 頂級銳利縮放 ＋ 強制插入 IDR 關鍵幀")
         lbl_lossless_info.setStyleSheet("color: #a0f0a0; font-size: 12px;")
         specs_layout.addWidget(lbl_lossless_info)
 
         right_layout.addWidget(group_specs)
 
+        # YouTube 限制自動分段保護群組
+        group_split = QGroupBox("🛡️ YouTube 限制自動分段保護（防 12 小時 / 256GB 超標）")
+        split_layout = QVBoxLayout(group_split)
+        self.chk_auto_split = QCheckBox("啟用 YouTube 官方限制自動分段（若超標自動切為 Part 1, Part 2...）")
+        self.chk_auto_split.setChecked(True)
+        self.chk_auto_split.stateChanged.connect(self._update_stats_estimate)
+        split_layout.addWidget(self.chk_auto_split)
+
+        row_limits = QHBoxLayout()
+        lbl_max_dur = QLabel("單部安全時長上限：")
+        self.combo_max_dur = QComboBox()
+        self.combo_max_dur.addItem("11 小時 40 分 (YT 12h 安全閾值)", 42000.0)
+        self.combo_max_dur.addItem("8 小時", 28800.0)
+        self.combo_max_dur.addItem("4 小時", 14400.0)
+        self.combo_max_dur.addItem("2 小時", 7200.0)
+        self.combo_max_dur.currentIndexChanged.connect(self._update_stats_estimate)
+
+        lbl_max_size = QLabel("單部安全容量上限：")
+        self.combo_max_size = QComboBox()
+        self.combo_max_size.addItem("240 GB (YT 256GB 安全閾值)", 240.0)
+        self.combo_max_size.addItem("180 GB", 180.0)
+        self.combo_max_size.addItem("100 GB", 100.0)
+        self.combo_max_size.addItem("50 GB", 50.0)
+        self.combo_max_size.currentIndexChanged.connect(self._update_stats_estimate)
+
+        row_limits.addWidget(lbl_max_dur)
+        row_limits.addWidget(self.combo_max_dur)
+        row_limits.addWidget(lbl_max_size)
+        row_limits.addWidget(self.combo_max_size)
+        split_layout.addLayout(row_limits)
+        right_layout.addWidget(group_split)
+
         # 輸出設定群組
-        group_output = QGroupBox("💾 輸出檔案位置")
+        group_output = QGroupBox("💾 預定輸出檔案")
         out_layout = QVBoxLayout(group_output)
         self.lbl_output_filename = QLabel("預定輸出影片：(請先選取起點資料夾)")
         self.lbl_output_chapter = QLabel("預定章節檔案：(自動生成同名 Chapters.txt)")
@@ -219,7 +255,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(group_log, stretch=1)
 
         splitter.addWidget(right_widget)
-        splitter.setSizes([480, 680])
+        splitter.setSizes([480, 720])
         main_layout.addWidget(splitter, stretch=1)
 
         # 底部：進度條與控制按鈕
@@ -328,30 +364,43 @@ class MainWindow(QMainWindow):
         s = int(est_sec % 60)
         duration_str = f"{h} 小時 {m} 分 {s} 秒" if h > 0 else f"{m} 分 {s} 秒"
 
-        # 預估大小（以選定的 profile bitrate 計算）
+        # 預估大小
         current_prof_id = self.combo_profile.currentData()
         prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
         bitrate_str = prof.get("bitrate", "240M")
-        mbps = int(bitrate_str.replace("M", ""))
-        est_gb = (est_sec * (mbps / 8)) / 1024
+        bitrate_num = int(bitrate_str.replace("M", "").replace("k", ""))
+        gb_per_sec = (bitrate_num / (8 * 1024)) if "M" in bitrate_str else (bitrate_num / (8 * 1024 * 1024))
+        est_gb = est_sec * gb_per_sec
+
+        # 計算分段狀態
+        is_auto_split = self.chk_auto_split.isChecked()
+        max_dur = self.combo_max_dur.currentData()
+        max_size = self.combo_max_size.currentData()
+
+        est_parts_by_dur = int(est_sec // max_dur) + (1 if est_sec % max_dur > 0 else 0)
+        est_parts_by_size = int(est_gb // max_size) + (1 if est_gb % max_size > 0 else 0)
+        estimated_parts = max(est_parts_by_dur, est_parts_by_size, 1)
 
         self.lbl_stat_target.setText(f"起點目標：【{node.name}】（包含其所有子資料夾）")
         self.lbl_stat_counts.setText(f"包含媒體：相片 {img_count} 張 / 影片 {vid_count} 支")
         self.lbl_stat_est_duration.setText(f"預估總時長：約 {duration_str}")
+        self.lbl_stat_est_size.setText(f"預估總容量：約 {est_gb:.1f} GB")
 
-        safe_tag = "安全 (< 256GB)" if est_gb < 256 else "⚠️ 注意！可能接近或超過 YouTube 256GB 限制"
-        self.lbl_stat_est_size.setText(
-            f"預估輸出大小：約 {est_gb:.1f} GB ({safe_tag})"
-        )
-
-        # 更新預定輸出路徑
         target_name = node.name.replace(" ", "_")
         res_tag = "8K" if "8k" in prof["id"] else "4K"
-        out_filename = f"{target_name}_{res_tag}_極致備份.mp4"
-        out_chapter = f"{target_name}_{res_tag}_Chapters.txt"
 
-        self.lbl_output_filename.setText(f"預定輸出影片：{out_filename}")
-        self.lbl_output_chapter.setText(f"預定章節檔案：{out_chapter}")
+        if estimated_parts > 1 and is_auto_split:
+            self.lbl_stat_split_info.setText(
+                f"🛡️ 分段保護啟動：超過 YT 限制，自動切分為 {estimated_parts} 部影片 (Part 1 ~ {estimated_parts})"
+            )
+            self.lbl_stat_split_info.setStyleSheet("color: #ffa500; font-weight: bold;")
+            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_Part01_{res_tag}_極致備份.mp4 等 {estimated_parts} 個檔案")
+            self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_Part01_{res_tag}_Chapters.txt 等 {estimated_parts} 個檔案")
+        else:
+            self.lbl_stat_split_info.setText("安全：總長度與容量在 YouTube 限制內，合成單一完整影片")
+            self.lbl_stat_split_info.setStyleSheet("color: #a0f0a0;")
+            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{res_tag}_極致備份.mp4")
+            self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_{res_tag}_Chapters.txt")
 
     def _on_start_render(self):
         if not self.selected_start_node:
@@ -363,7 +412,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "無媒體項目", "所選起點目錄內沒有可處理的照片或影片！")
             return
 
-        # 取得設定檔
         current_prof_id = self.combo_profile.currentData()
         prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
 
@@ -378,6 +426,9 @@ class MainWindow(QMainWindow):
             fill_mode=self.combo_fill.currentData(),
             audio_bitrate="512k",
             audio_samplerate=48000,
+            enable_auto_split=self.chk_auto_split.isChecked(),
+            max_duration_seconds=float(self.combo_max_dur.currentData()),
+            max_size_gb=float(self.combo_max_size.currentData()),
         )
 
         out_dir = node.dir_path
@@ -386,17 +437,6 @@ class MainWindow(QMainWindow):
         res_tag = "8K" if "8k" in prof["id"] else "4K"
         out_video = os.path.join(out_dir, f"{target_name}_{res_tag}_極致備份.mp4")
         out_chap = os.path.join(out_dir, f"{target_name}_{res_tag}_Chapters.txt")
-
-        # 確認覆蓋
-        if os.path.exists(out_video):
-            reply = QMessageBox.question(
-                self,
-                "確認覆蓋",
-                f"檔案 {os.path.basename(out_video)} 已存在，是否確認重新合成並覆蓋？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
 
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -416,7 +456,7 @@ class MainWindow(QMainWindow):
     def _on_render_progress(self, current: int, total: int, msg: str):
         percent = int((current / total) * 100) if total > 0 else 0
         self.progress_bar.setValue(percent)
-        self.lbl_progress_status.setText(f"進度 {percent}% - {msg}")
+        self.lbl_progress_status.setText(f"{msg} ({percent}%)")
 
     def _on_render_finished(self, success: bool, message: str):
         self.btn_start.setEnabled(True)
@@ -426,11 +466,11 @@ class MainWindow(QMainWindow):
 
         if success:
             self.progress_bar.setValue(100)
-            self.lbl_progress_status.setText("完成！影片已成功合成。")
+            self.lbl_progress_status.setText("完成！備份影片已全部合成。")
             QMessageBox.information(
                 self,
                 "備份完成",
-                f"單一極致備份影片與 YouTube 章節檔已產生完畢！\n\n路徑：\n{message}",
+                f"備份影片與對應的 YouTube 章節檔案已產生完畢！\n\n路徑：\n{self.last_output_dir}",
             )
         else:
             self.lbl_progress_status.setText("處理失敗或已終止。")

@@ -1,21 +1,39 @@
 @echo off
-chcp 65001 >nul
-title 相簿轉 8K/4K YouTube 極致備份影片合成工具
+cd /d "%~dp0"
 
-set PYTHON_CMD=python
-where python >nul 2>nul
-if %errorlevel% neq 0 (
-    if exist "%LOCALAPPDATA%\Python\pythoncore-3.11-64\python.exe" (
-        set PYTHON_CMD="%LOCALAPPDATA%\Python\pythoncore-3.11-64\python.exe"
-    ) else if exist "%LOCALAPPDATA%\Python\bin\python.exe" (
-        set PYTHON_CMD="%LOCALAPPDATA%\Python\bin\python.exe"
-    )
+set "PY="
+
+if exist "%LOCALAPPDATA%\Python\pythoncore-3.11-64\python.exe" (
+    set "PY=%LOCALAPPDATA%\Python\pythoncore-3.11-64\python.exe"
+    goto :FOUND
 )
 
-echo [資訊] 正在啟動 8K/4K 極致備份影片合成工具...
-%PYTHON_CMD% app.py
+if exist "%LOCALAPPDATA%\Python\bin\python.exe" (
+    set "PY=%LOCALAPPDATA%\Python\bin\python.exe"
+    goto :FOUND
+)
 
+where py.exe >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY=py"
+    goto :FOUND
+)
+
+where python.exe >nul 2>&1
+if %errorlevel% equ 0 (
+    set "PY=python"
+    goto :FOUND
+)
+
+:NOTFOUND
+echo [ERROR] Python not found. Please install Python 3.11 or check your path.
+pause
+exit /b 1
+
+:FOUND
+echo [INFO] Starting PhotoToVideo GUI with: %PY%
+"%PY%" app.py %*
 if %errorlevel% neq 0 (
-    echo [錯誤] 程式執行出現異常，請檢查上方訊息。
+    echo [ERROR] Application exited with error code %errorlevel%.
     pause
 )

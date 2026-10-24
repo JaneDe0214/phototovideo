@@ -2,12 +2,12 @@
 FFmpeg 8K/4K 極致品質影片渲染引擎
 支援智慧毛玻璃填充、Lanczos 頂級縮放、48kHz 512kbps 最高音訊規格、
 GOP 關鍵影格強制插入（確保截圖零失真）、分段快取與無損 Concat 合成。
+支援 YouTube 官方 12 小時 / 256GB 限制智慧自動分段（Multi-Part Splitting）。
 """
 
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 from core.chapter_generator import ChapterGenerator
@@ -31,6 +31,9 @@ class RenderConfig:
         show_watermark: bool = True,       # 是否在角落顯示微小檔名與時間
         audio_bitrate: str = "512k",       # 最高規格 512 kbps 立體聲
         audio_samplerate: int = 48000,     # 48 kHz 高解析度取樣率
+        enable_auto_split: bool = True,    # 啟用 YouTube 限制自動分段
+        max_duration_seconds: float = 42000.0,  # 11 小時 40 分 (YT 12h 安全線)
+        max_size_gb: float = 240.0,             # 240 GB (YT 256GB 安全線)
     ):
         self.resolution = resolution
         self.width, self.height = map(int, resolution.split("x"))
@@ -44,6 +47,9 @@ class RenderConfig:
         self.show_watermark = show_watermark
         self.audio_bitrate = audio_bitrate
         self.audio_samplerate = audio_samplerate
+        self.enable_auto_split = enable_auto_split
+        self.max_duration_seconds = max_duration_seconds
+        self.max_size_gb = max_size_gb
 
 
 class VideoRenderEngine:
@@ -90,18 +96,65 @@ class VideoRenderEngine:
         except Exception:
             return 10.0
 
+    def split_media_into_parts(
+        self, media_list: List[Tuple[MediaItem, str]]
+    ) -> List[List[Tuple[MediaItem, str]]]:
+        """
+        依據 YouTube 官方限制（12 小時 / 256GB 安全線）將媒體清單自動切分為多個 Part
+        """
+        if not self.config.enable_auto_split:
+            return [media_list]
+
+        # 換算位元率為每秒 GB 數
+        bitrate_num = int(self.config.bitrate.replace("M", "").replace("k", ""))
+        if "k" in self.config.bitrate:
+            gb_per_sec = (bitrate_num / (8 * 1024 * 1024))
+        else:
+            gb_per_sec = (bitrate_num / (8 * 1024))
+
+        parts: List[List[Tuple[MediaItem, str]]] = []
+        current_part: List[Tuple[MediaItem, str]] = []
+        current_part_duration = 0.0
+        current_part_size_gb = 0.0
+
+        for item, rel_dir in media_list:
+            if item.is_image:
+                dur = self.config.image_duration
+            else:
+                dur = self._get_video_duration(item.file_path)
+
+            est_item_size_gb = dur * gb_per_sec
+
+            # 檢查加入此項目是否會超過安全線（且當前 part 至少已有 1 個項目）
+            would_exceed_dur = (current_part_duration + dur) > self.config.max_duration_seconds
+            would_exceed_size = (current_part_size_gb + est_item_size_gb) > self.config.max_size_gb
+
+            if (would_exceed_dur or would_exceed_size) and current_part:
+                parts.append(current_part)
+                current_part = []
+                current_part_duration = 0.0
+                current_part_size_gb = 0.0
+
+            current_part.append((item, rel_dir))
+            current_part_duration += dur
+            current_part_size_gb += est_item_size_gb
+
+        if current_part:
+            parts.append(current_part)
+
+        return parts
+
     def render_album_to_video(
         self,
         media_list: List[Tuple[MediaItem, str]],
-        output_video_path: str,
-        output_chapter_path: str,
+        base_output_video_path: str,
+        base_output_chapter_path: str,
         target_title: str,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
     ) -> bool:
         """
-        將已排序的媒體清單合成為單一最高規格 8K/4K 備份影片。
-        採用分段標準化處理，確保高穩定度、不爆記憶體、無失真。
+        自動分段批次渲染輸出。若超過限制則自動生成 Part 1, Part 2 等多部影片。
         """
         if not self.ffmpeg_path or not os.path.exists(self.ffmpeg_path):
             if log_callback:
@@ -109,25 +162,90 @@ class VideoRenderEngine:
             return False
 
         self._is_cancelled = False
-        os.makedirs(os.path.dirname(os.path.abspath(output_video_path)), exist_ok=True)
+        parts = self.split_media_into_parts(media_list)
+        total_parts = len(parts)
 
-        temp_dir = os.path.join(
-            os.path.dirname(os.path.abspath(output_video_path)),
-            f"_temp_render_{int(time.time())}",
-        )
-        os.makedirs(temp_dir, exist_ok=True)
+        if log_callback:
+            if total_parts > 1:
+                log_callback(
+                    f"[注意] 偵測到總項目長度或預估容量超過 YouTube 安全限制！\n"
+                    f"系統已自動切分為 {total_parts} 個獨立備份影片 (Part 1 ~ Part {total_parts})\n"
+                )
+            else:
+                log_callback(f"總長度在安全限制範圍內，將合併為單一 8K/4K 影片。\n")
 
-        chapter_gen = ChapterGenerator(target_title)
-        current_time_sec = 0.0
-        segment_files: List[str] = []
-        total_items = len(media_list)
+        for part_idx, part_media in enumerate(parts, start=1):
+            if self._is_cancelled:
+                if log_callback:
+                    log_callback("【任務已取消】使用者終止了處理程序。")
+                return False
+
+            # 計算輸出檔案名稱
+            if total_parts > 1:
+                base_dir = os.path.dirname(os.path.abspath(base_output_video_path))
+                video_name, video_ext = os.path.splitext(os.path.basename(base_output_video_path))
+                chap_name, chap_ext = os.path.splitext(os.path.basename(base_output_chapter_path))
+
+                part_tag = f"_Part{part_idx:02d}"
+                out_video = os.path.join(base_dir, f"{video_name}{part_tag}{video_ext}")
+                out_chap = os.path.join(base_dir, f"{chap_name}{part_tag}{chap_ext}")
+                part_title = f"{target_title} (Part {part_idx:02d}/{total_parts:02d})"
+            else:
+                out_video = base_output_video_path
+                out_chap = base_output_chapter_path
+                part_title = target_title
+
+            if log_callback:
+                log_callback(
+                    f"==================================================\n"
+                    f"[處理中] 開始處理第 {part_idx}/{total_parts} 部影片：『{part_title}』\n"
+                    f"本段收錄項目：{len(part_media)} 個媒體檔案\n"
+                    f"=================================================="
+                )
+
+            success = self._render_single_part(
+                part_media,
+                out_video,
+                out_chap,
+                target_title,
+                part_idx,
+                total_parts,
+                progress_callback,
+                log_callback,
+            )
+
+            if not success:
+                return False
 
         if log_callback:
             log_callback(
-                f"開始處理備份任務：『{target_title}』，共 {total_items} 個項目\n"
-                f"目標畫質規格：{self.config.resolution} @ {self.config.fps}fps, 流量 {self.config.bitrate}\n"
-                f"音訊規格：AAC {self.config.audio_bitrate} @ {self.config.audio_samplerate}Hz\n"
+                f"[完成] 所有備份影片（共 {total_parts} 部）已全數成功產出完畢！"
             )
+        return True
+
+    def _render_single_part(
+        self,
+        part_media: List[Tuple[MediaItem, str]],
+        output_video_path: str,
+        output_chapter_path: str,
+        target_title: str,
+        part_index: int,
+        total_parts: int,
+        progress_callback: Optional[Callable[[int, int, str], None]],
+        log_callback: Optional[Callable[[str], None]],
+    ) -> bool:
+        """渲染單一個 Part 影片"""
+        os.makedirs(os.path.dirname(os.path.abspath(output_video_path)), exist_ok=True)
+        temp_dir = os.path.join(
+            os.path.dirname(os.path.abspath(output_video_path)),
+            f"_temp_render_p{part_index}_{int(time.time())}",
+        )
+        os.makedirs(temp_dir, exist_ok=True)
+
+        chapter_gen = ChapterGenerator(target_title, part_index, total_parts)
+        current_time_sec = 0.0
+        segment_files: List[str] = []
+        total_items = len(part_media)
 
         try:
             startupinfo = None
@@ -135,18 +253,15 @@ class VideoRenderEngine:
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            for idx, (item, rel_dir) in enumerate(media_list):
+            for idx, (item, rel_dir) in enumerate(part_media):
                 if self._is_cancelled:
-                    if log_callback:
-                        log_callback("【任務已取消】使用者終止了處理程序。")
                     return False
 
                 item_filename = item.file_name
-                # 更新章節時間
                 chapter_gen.add_entry(current_time_sec, item_filename, rel_dir)
-
-                # 準備分段輸出檔案路徑
                 seg_output = os.path.join(temp_dir, f"seg_{idx:05d}.mp4")
+
+                part_prefix = f"[Part {part_index}/{total_parts}] " if total_parts > 1 else ""
 
                 if item.is_image:
                     item_duration = self.config.image_duration
@@ -155,7 +270,7 @@ class VideoRenderEngine:
                         progress_callback(
                             idx + 1,
                             total_items,
-                            f"處理照片 ({idx + 1}/{total_items})：{item_filename}",
+                            f"{part_prefix}處理照片 ({idx + 1}/{total_items})：{item_filename}",
                         )
                     success = self._render_image_segment(
                         item, seg_output, item_duration, startupinfo, log_callback
@@ -168,7 +283,7 @@ class VideoRenderEngine:
                         progress_callback(
                             idx + 1,
                             total_items,
-                            f"處理影片 ({idx + 1}/{total_items})：{item_filename}",
+                            f"{part_prefix}處理影片 ({idx + 1}/{total_items})：{item_filename}",
                         )
                     success = self._render_video_segment(
                         item, seg_output, startupinfo, log_callback
@@ -176,14 +291,14 @@ class VideoRenderEngine:
 
                 if not success:
                     if log_callback:
-                        log_callback(f"【警告】項目 {item_filename} 渲染失敗，將嘗試繼續。")
+                        log_callback(f"【警告】項目 {item_filename} 渲染失敗，跳過繼續。")
                     continue
 
                 segment_files.append(seg_output)
 
             if not segment_files:
                 if log_callback:
-                    log_callback("【錯誤】無成功渲染的片段，無法產生最終影片。")
+                    log_callback("【錯誤】本段無有效渲染片段。")
                 return False
 
             # 產生 YouTube 章節檔案
@@ -193,18 +308,16 @@ class VideoRenderEngine:
 
             # 合併所有片段為單一巨大影片
             if progress_callback:
-                progress_callback(total_items, total_items, "正在進行無損極速封裝合併...")
+                progress_callback(total_items, total_items, f"{part_prefix}正在進行無損極速封裝合併...")
             if log_callback:
-                log_callback("正在將所有標準化片段進行無損合併...")
+                log_callback(f"正在將本段片段進行無損合併...")
 
             concat_list_file = os.path.join(temp_dir, "concat_list.txt")
             with open(concat_list_file, "w", encoding="utf-8") as f:
                 for seg in segment_files:
-                    # Windows 路徑格式處理
                     formatted_path = seg.replace("\\", "/")
                     f.write(f"file '{formatted_path}'\n")
 
-            # 執行 Concat Demuxer（極速直接複製串接，不二次轉碼）
             concat_cmd = [
                 self.ffmpeg_path,
                 "-y",
@@ -231,11 +344,10 @@ class VideoRenderEngine:
                 return False
 
             if log_callback:
-                log_callback(f"[完成] 單一極致備份影片已成功建立：{output_video_path}")
+                log_callback(f"[完成] 影片已成功產出：{output_video_path}\n")
             return True
 
         finally:
-            # 清理暫存資料夾
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception:
@@ -259,7 +371,6 @@ class VideoRenderEngine:
         w, h = self.config.width, self.config.height
         fps = self.config.fps
 
-        # 毛玻璃背景濾鏡鏈
         if self.config.fill_mode == "blur":
             filter_complex = (
                 f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase:flags=bicubic,"
@@ -268,7 +379,6 @@ class VideoRenderEngine:
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
             )
         else:
-            # 黑邊模式
             filter_complex = (
                 f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,"
                 f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black[v]"
@@ -280,7 +390,6 @@ class VideoRenderEngine:
             "-loop", "1",
             "-t", str(duration),
             "-i", item.file_path,
-            # 加入最高規格靜音軌
             "-f", "lavfi",
             "-t", str(duration),
             "-i", f"anullsrc=r={self.config.audio_samplerate}:cl=stereo",
@@ -292,7 +401,6 @@ class VideoRenderEngine:
             "-maxrate", self.config.maxrate,
             "-bufsize", self.config.bufsize,
             "-r", str(fps),
-            # 強制關鍵影格間隔（GOP = 1 秒，確保精準截圖）
             "-g", str(fps),
             "-keyint_min", str(fps),
             "-pix_fmt", "yuv420p",

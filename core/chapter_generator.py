@@ -2,6 +2,7 @@
 YouTube 章節時間軸生成模組
 自動產生符合 YouTube 官方規範的說明欄章節文字檔（Chapters.txt）
 包含子目錄大章節標題、拍攝日期、時間與原始檔案名稱
+支援多 Part 分段標記
 """
 
 import os
@@ -25,8 +26,10 @@ def format_timestamp(seconds: float) -> str:
 class ChapterGenerator:
     """YouTube 章節生成器"""
 
-    def __init__(self, target_title: str):
+    def __init__(self, target_title: str, part_index: int = 1, total_parts: int = 1):
         self.target_title = target_title
+        self.part_index = part_index
+        self.total_parts = total_parts
         # 儲存 (開始秒數, 章節標題, 所屬分類)
         self.entries: List[Tuple[float, str, str]] = []
 
@@ -37,8 +40,9 @@ class ChapterGenerator:
         """
         生成可直接複製貼上至 YouTube 說明欄的文字內容
         """
+        part_tag = f" [Part {self.part_index:02d}/{self.total_parts:02d}]" if self.total_parts > 1 else ""
         lines = [
-            f"=== 8K 極致備份影片章節索引：{self.target_title} ===",
+            f"=== 8K 極致備份影片章節索引：{self.target_title}{part_tag} ===",
             "（複製以下內容貼至 YouTube 影片說明欄，即可自動啟用章節進度條）",
             "",
             "【時間軸目錄】",

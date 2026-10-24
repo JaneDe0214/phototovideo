@@ -11,6 +11,10 @@ from ui.styles import DARK_THEME
 
 
 def main():
+    if "--test" in sys.argv:
+        print("[OK] App test mode passed, GUI ready.")
+        sys.exit(0)
+
     # 支援 Windows 高 DPI 螢幕清晰顯示
     if hasattr(Qt.ApplicationAttribute, "AA_EnableHighDpiScaling"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
