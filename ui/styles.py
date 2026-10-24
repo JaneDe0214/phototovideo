@@ -102,7 +102,8 @@ QComboBox {
     border: 1px solid #4a4a5a;
     border-radius: 6px;
     color: #ffffff;
-    padding: 6px 12px;
+    padding: 4px 10px;
+    min-height: 28px;
 }
 
 QComboBox:hover {
@@ -121,7 +122,8 @@ QSpinBox, QDoubleSpinBox, QLineEdit {
     border: 1px solid #4a4a5a;
     border-radius: 6px;
     color: #ffffff;
-    padding: 6px;
+    padding: 4px 8px;
+    min-height: 28px;
 }
 
 QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover {

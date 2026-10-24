@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTextEdit,
@@ -153,10 +155,16 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left_widget)
 
-        # 右側面板：最高規格與渲染選項
+        # 右側面板：使用平滑滾動區域，徹底解決視窗縮放或最大化時控制項被擠壓扁掉的問題
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(6, 0, 10, 0)
+        right_layout.setSpacing(10)
 
         # ⚡ 硬體加速支援儀表板群組
         group_hw = QGroupBox("⚡ 本電腦實體硬體加速支援儀表板（動態實測）")
@@ -234,22 +242,19 @@ class MainWindow(QMainWindow):
 
         # ⚡ 多工平行處理加速設定
         cpu_count = os.cpu_count() or 4
-        default_concurrency = 8 if cpu_count >= 16 else (4 if cpu_count >= 8 else 2)
-
         row_concur = QHBoxLayout()
         lbl_concur = QLabel(f"⚡ 平行處理加速（偵測到 {cpu_count} 核心）：")
         self.combo_concurrency = QComboBox()
-        self.combo_concurrency.addItem(f"8 緒平行加速 (推薦，充分餵飽 GPU 雙引擎)", 8)
-        self.combo_concurrency.addItem(f"4 緒平行加速 (均衡順暢)", 4)
-        self.combo_concurrency.addItem(f"12 緒平行加速 (極速狂飆，適合 20+ 核心 CPU)", 12)
-        self.combo_concurrency.addItem(f"16 緒極限加速", 16)
-        self.combo_concurrency.addItem(f"1 緒 (單工除錯模式)", 1)
-
-        # 設定預設選中
-        for i in range(self.combo_concurrency.count()):
-            if self.combo_concurrency.itemData(i) == default_concurrency:
-                self.combo_concurrency.setCurrentIndex(i)
-                break
+        self.combo_concurrency.addItem(f"⚡ 自動全開 ({cpu_count} 核心全速開火)", cpu_count)
+        if cpu_count >= 24:
+            self.combo_concurrency.addItem("24 緒極速狂飆", 24)
+        if cpu_count >= 16:
+            self.combo_concurrency.addItem("16 緒極速狂飆", 16)
+        if cpu_count >= 12:
+            self.combo_concurrency.addItem("12 緒平行加速", 12)
+        self.combo_concurrency.addItem("8 緒平行加速 (雙引擎均衡推薦)", 8)
+        self.combo_concurrency.addItem("4 緒平行加速", 4)
+        self.combo_concurrency.addItem("1 緒 (單工除錯模式)", 1)
 
         row_concur.addWidget(lbl_concur)
         row_concur.addWidget(self.combo_concurrency)
@@ -338,11 +343,13 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout(group_log)
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
+        self.txt_log.setMinimumHeight(140)
         log_layout.addWidget(self.txt_log)
-        right_layout.addWidget(group_log, stretch=1)
+        right_layout.addWidget(group_log)
 
-        splitter.addWidget(right_widget)
-        splitter.setSizes([480, 720])
+        right_scroll.setWidget(right_widget)
+        splitter.addWidget(right_scroll)
+        splitter.setSizes([460, 740])
         main_layout.addWidget(splitter, stretch=1)
 
         # 底部：進度條與控制按鈕
