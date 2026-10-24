@@ -94,7 +94,7 @@ class ChapterGenerator:
             else ""
         )
         lines = [
-            f"=== 8K 極致備份影片章節索引：{self.target_title}{part_tag} ===",
+            f"=== 8K/4K 影片章節索引：{self.target_title}{part_tag} ===",
             "（複製以下內容貼至 YouTube 影片說明欄，即可自動啟用章節進度條）",
         ]
 

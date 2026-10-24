@@ -384,3 +384,48 @@ def calculate_safe_concurrency(total_ram_gb: float, is_8k: bool, max_cores: int)
 
     return max(1, min(safe_concur, max_cores))
 
+
+def get_output_spec_tag(prof: Dict) -> str:
+    """
+    根據選取的畫質規格，產生符合使用者要求的標準命名標籤：
+    格式：[解析度]_[晶片名稱]_[轉檔格式]
+    範例：8K_IntelArc_AV1、8K_IntelQSV_HEVC、4K_IntelQSV_HEVC、8K_CPU_HEVC
+    徹底取消舊有的「極致備份」字樣，純粹清楚呈現晶片與編碼格式。
+    """
+    # 1. 解析度標籤
+    res = (
+        "8K"
+        if "8k" in str(prof.get("resolution", "")).lower()
+        or "8k" in str(prof.get("id", "")).lower()
+        else "4K"
+    )
+
+    # 2. 轉檔編碼格式
+    vcodec = str(prof.get("vcodec", "")).lower()
+    if "av1" in vcodec:
+        codec_name = "AV1"
+    elif "hevc" in vcodec or "x265" in vcodec:
+        codec_name = "HEVC"
+    elif "h264" in vcodec or "x264" in vcodec:
+        codec_name = "H264"
+    else:
+        codec_name = vcodec.upper()
+
+    # 3. 晶片/硬體名稱
+    hw_type = str(prof.get("hw_type", "")).lower()
+    if "arc" in hw_type:
+        chip_name = "IntelArc"
+    elif "qsv" in hw_type or "intel" in hw_type:
+        chip_name = "IntelQSV"
+    elif "nvenc" in hw_type or "nvidia" in hw_type:
+        chip_name = "NVIDIA-NVENC"
+    elif "amf" in hw_type or "amd" in hw_type:
+        chip_name = "AMD-AMF"
+    elif "cpu" in hw_type:
+        chip_name = "CPU"
+    else:
+        chip_name = "Hardware"
+
+    return f"{res}_{chip_name}_{codec_name}"
+
+

@@ -38,6 +38,7 @@ from core.encoder_detector import (
     find_ffmpeg,
     get_system_memory_info,
     calculate_safe_concurrency,
+    get_output_spec_tag,
 )
 from core.ffmpeg_engine import RenderConfig, VideoRenderEngine
 from core.scanner import AlbumScanner, DirectoryTreeNode
@@ -93,7 +94,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("相簿轉 8K/4K YouTube 極致備份影片合成工具")
+        self.setWindowTitle("相簿轉 8K/4K YouTube 影片合成工具")
         self.resize(1200, 800)
 
         self.root_node: Optional[DirectoryTreeNode] = None
@@ -377,7 +378,7 @@ class MainWindow(QMainWindow):
         bottom_box.addWidget(self.progress_bar)
 
         btn_box = QHBoxLayout()
-        self.btn_start = QPushButton("🚀 開始合成單一極致備份影片")
+        self.btn_start = QPushButton("🚀 開始合成 8K/4K 影片")
         self.btn_start.setObjectName("btn_primary")
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self._on_start_render)
@@ -553,7 +554,7 @@ class MainWindow(QMainWindow):
         self.lbl_stat_est_size.setText(f"預估總容量：約 {est_gb:.1f} GB")
 
         target_name = node.name.replace(" ", "_")
-        res_tag = "8K" if "8k" in prof["id"] else "4K"
+        spec_tag = get_output_spec_tag(prof)
         out_dir = self._get_effective_output_dir()
         dir_display = f"\n儲存目錄：{out_dir}" if out_dir else ""
 
@@ -562,13 +563,13 @@ class MainWindow(QMainWindow):
                 f"🛡️ 分段保護啟動：超過 YT 限制，自動切分為 {estimated_parts} 部影片 (Part 1 ~ {estimated_parts})"
             )
             self.lbl_stat_split_info.setStyleSheet("color: #ffa500; font-weight: bold;")
-            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_Part01_{res_tag}_極致備份.mp4 等 {estimated_parts} 個檔案{dir_display}")
-            self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_Part01_{res_tag}_Chapters.txt 等 {estimated_parts} 個檔案")
+            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{spec_tag}_Part01.mp4 等 {estimated_parts} 個檔案{dir_display}")
+            self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_{spec_tag}_Part01_Chapters.txt 等 {estimated_parts} 個檔案")
         else:
             self.lbl_stat_split_info.setText("安全：總長度與容量在 YouTube 限制內，合成單一完整影片")
             self.lbl_stat_split_info.setStyleSheet("color: #a0f0a0;")
-            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{res_tag}_極致備份.mp4{dir_display}")
-            self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_{res_tag}_Chapters.txt")
+            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{spec_tag}.mp4{dir_display}")
+            self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_{spec_tag}_Chapters.txt")
 
     def _update_memory_safeguard_status(self):
         """根據解析度（8K/4K）與目前配置之平行緒數，動態評估實體 RAM 與 SSD SWAP 風險"""
@@ -687,9 +688,9 @@ class MainWindow(QMainWindow):
 
         self.last_output_dir = out_dir
         target_name = node.name.replace(" ", "_")
-        res_tag = "8K" if "8k" in prof["id"] else "4K"
-        out_video = os.path.join(out_dir, f"{target_name}_{res_tag}_極致備份.mp4")
-        out_chap = os.path.join(out_dir, f"{target_name}_{res_tag}_Chapters.txt")
+        spec_tag = get_output_spec_tag(prof)
+        out_video = os.path.join(out_dir, f"{target_name}_{spec_tag}.mp4")
+        out_chap = os.path.join(out_dir, f"{target_name}_{spec_tag}_Chapters.txt")
 
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
