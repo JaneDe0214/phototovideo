@@ -6,5 +6,7 @@ _temp_render_*
 *.mkv
 bin/ffmpeg.exe
 bin/ffprobe.exe
+build/
+dist/
 .vscode/
 .idea/

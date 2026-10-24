@@ -4,6 +4,13 @@
 
 import sys
 import os
+
+# 在無主控台（--noconsole）模式下防護 stdout / stderr 為 None 的情況
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from ui.main_window import MainWindow

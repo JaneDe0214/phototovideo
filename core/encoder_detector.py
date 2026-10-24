@@ -9,6 +9,7 @@
 """
 
 import os
+import sys
 import shutil
 import subprocess
 import glob
@@ -16,17 +17,42 @@ from typing import Dict, List, Optional, Tuple
 
 
 def find_ffmpeg() -> Tuple[Optional[str], Optional[str]]:
-    """尋找系統中的 ffmpeg 與 ffprobe 可執行檔路徑"""
-    local_ffmpeg = os.path.join(os.getcwd(), "bin", "ffmpeg.exe")
-    local_ffprobe = os.path.join(os.getcwd(), "bin", "ffprobe.exe")
-    if os.path.exists(local_ffmpeg):
-        return local_ffmpeg, local_ffprobe if os.path.exists(local_ffprobe) else None
+    """
+    尋找系統中的 ffmpeg 與 ffprobe 可執行檔路徑。
+    支援開發模式、PyInstaller 綠色免安裝目錄與單一檔案打包環境，
+    優先偵測應用程式自帶的可攜式 bin/ffmpeg.exe。
+    """
+    candidate_dirs = []
 
+    # 1. 打包執行檔環境 (PyInstaller frozen)
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        candidate_dirs.append(exe_dir)
+        candidate_dirs.append(os.path.join(exe_dir, "_internal"))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate_dirs.append(meipass)
+
+    # 2. 專案程式碼所在環境與工作目錄
+    code_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidate_dirs.append(code_dir)
+    candidate_dirs.append(os.getcwd())
+
+    # 依序檢查候選目錄下的 bin/ 或根目錄
+    for base in candidate_dirs:
+        for sub in ["bin", ""]:
+            ff = os.path.join(base, sub, "ffmpeg.exe") if sub else os.path.join(base, "ffmpeg.exe")
+            fp = os.path.join(base, sub, "ffprobe.exe") if sub else os.path.join(base, "ffprobe.exe")
+            if os.path.exists(ff):
+                return ff, fp if os.path.exists(fp) else None
+
+    # 3. 系統 PATH
     ffmpeg_path = shutil.which("ffmpeg")
     ffprobe_path = shutil.which("ffprobe")
     if ffmpeg_path:
         return ffmpeg_path, ffprobe_path
 
+    # 4. WinGet 預設安裝路徑
     local_app_data = os.environ.get("LOCALAPPDATA", "")
     if local_app_data:
         winget_pattern = os.path.join(
