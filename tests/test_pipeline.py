@@ -142,7 +142,26 @@ def run_test():
         print("\nPart 1 章節內容：\n" + p1_text)
         assert "Part 01/02" in p1_text
 
-        print("\n[PASS] 單一與自動分段測試全數通過！功能完全符合預期！")
+        print("\n=== [6/6] 測試自訂輸出資料夾（避免唯讀網路相簿目錄） ===")
+        custom_out_dir = os.path.join(temp_dir, "Custom_Local_Output")
+        os.makedirs(custom_out_dir, exist_ok=True)
+
+        custom_video = os.path.join(custom_out_dir, "Custom_Output_8K.mp4")
+        custom_chap = os.path.join(custom_out_dir, "Custom_Output_Chapters.txt")
+
+        res3 = engine_single.render_album_to_video(
+            sorted_media,
+            custom_video,
+            custom_chap,
+            "2024-05_日本行(自訂輸出)",
+            log_callback=lambda msg: print(f"  [自訂輸出] {msg}"),
+        )
+        assert res3, "自訂輸出目錄渲染必須成功"
+        assert os.path.exists(custom_video), "自訂目錄中影片檔案必須存在"
+        assert os.path.exists(custom_chap), "自訂目錄中章節檔案必須存在"
+        print(f"自訂目錄檔案產出成功：{custom_video} (大小: {os.path.getsize(custom_video)} bytes)")
+
+        print("\n[PASS] 全部測試項目全數通過！功能完全符合預期！")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

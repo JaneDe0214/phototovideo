@@ -236,8 +236,31 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(group_split)
 
         # 輸出設定群組
-        group_output = QGroupBox("💾 預定輸出檔案")
+        group_output = QGroupBox("💾 輸出檔案設定（可自訂儲存位置，避免唯讀網路資料夾）")
         out_layout = QVBoxLayout(group_output)
+
+        # 輸出路徑選擇模式
+        row_out_mode = QHBoxLayout()
+        self.chk_custom_out = QCheckBox("自訂輸出資料夾（若來源為唯讀 NAS 或網路磁碟，請務必勾選並選擇本機目錄）")
+        self.chk_custom_out.setChecked(False)
+        self.chk_custom_out.stateChanged.connect(self._on_custom_out_toggled)
+        row_out_mode.addWidget(self.chk_custom_out)
+        out_layout.addLayout(row_out_mode)
+
+        row_custom_path = QHBoxLayout()
+        self.txt_custom_out_dir = QLineEdit()
+        self.txt_custom_out_dir.setPlaceholderText("請點選右側按鈕選擇輸出目錄...")
+        self.txt_custom_out_dir.setEnabled(False)
+        self.txt_custom_out_dir.textChanged.connect(self._update_stats_estimate)
+
+        self.btn_browse_out = QPushButton("📁 瀏覽...")
+        self.btn_browse_out.setEnabled(False)
+        self.btn_browse_out.clicked.connect(self._on_browse_output_dir)
+
+        row_custom_path.addWidget(self.txt_custom_out_dir, stretch=1)
+        row_custom_path.addWidget(self.btn_browse_out)
+        out_layout.addLayout(row_custom_path)
+
         self.lbl_output_filename = QLabel("預定輸出影片：(請先選取起點資料夾)")
         self.lbl_output_chapter = QLabel("預定章節檔案：(自動生成同名 Chapters.txt)")
         self.lbl_output_filename.setStyleSheet("color: #dcdce0;")
@@ -287,6 +310,40 @@ class MainWindow(QMainWindow):
         bottom_box.addLayout(btn_box)
 
         main_layout.addLayout(bottom_box)
+
+    def _on_custom_out_toggled(self, state):
+        is_custom = self.chk_custom_out.isChecked()
+        self.txt_custom_out_dir.setEnabled(is_custom)
+        self.btn_browse_out.setEnabled(is_custom)
+        self._update_stats_estimate()
+
+    def _on_browse_output_dir(self):
+        folder = QFileDialog.getExistingDirectory(self, "選擇輸出儲存資料夾（建議選擇本機硬碟）")
+        if folder:
+            self.txt_custom_out_dir.setText(os.path.normpath(folder))
+            self._update_stats_estimate()
+
+    def _get_effective_output_dir(self) -> str:
+        if self.chk_custom_out.isChecked() and self.txt_custom_out_dir.text().strip():
+            return os.path.normpath(self.txt_custom_out_dir.text().strip())
+        if self.selected_start_node:
+            return self.selected_start_node.dir_path
+        return ""
+
+    def _is_dir_writable(self, dir_path: str) -> bool:
+        if not dir_path:
+            return False
+        import time
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+            test_file = os.path.join(dir_path, f".write_test_{int(time.time())}.tmp")
+            with open(test_file, "w", encoding="utf-8") as f:
+                f.write("test_permission")
+            if os.path.exists(test_file):
+                os.remove(test_file)
+            return True
+        except Exception:
+            return False
 
     def _check_environment(self):
         ffmpeg_bin, _ = find_ffmpeg()
@@ -388,18 +445,20 @@ class MainWindow(QMainWindow):
 
         target_name = node.name.replace(" ", "_")
         res_tag = "8K" if "8k" in prof["id"] else "4K"
+        out_dir = self._get_effective_output_dir()
+        dir_display = f"\n儲存目錄：{out_dir}" if out_dir else ""
 
         if estimated_parts > 1 and is_auto_split:
             self.lbl_stat_split_info.setText(
                 f"🛡️ 分段保護啟動：超過 YT 限制，自動切分為 {estimated_parts} 部影片 (Part 1 ~ {estimated_parts})"
             )
             self.lbl_stat_split_info.setStyleSheet("color: #ffa500; font-weight: bold;")
-            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_Part01_{res_tag}_極致備份.mp4 等 {estimated_parts} 個檔案")
+            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_Part01_{res_tag}_極致備份.mp4 等 {estimated_parts} 個檔案{dir_display}")
             self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_Part01_{res_tag}_Chapters.txt 等 {estimated_parts} 個檔案")
         else:
             self.lbl_stat_split_info.setText("安全：總長度與容量在 YouTube 限制內，合成單一完整影片")
             self.lbl_stat_split_info.setStyleSheet("color: #a0f0a0;")
-            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{res_tag}_極致備份.mp4")
+            self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{res_tag}_極致備份.mp4{dir_display}")
             self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_{res_tag}_Chapters.txt")
 
     def _on_start_render(self):
@@ -410,6 +469,23 @@ class MainWindow(QMainWindow):
         sorted_media = AlbumScanner.get_sorted_media_from_node(node)
         if not sorted_media:
             QMessageBox.warning(self, "無媒體項目", "所選起點目錄內沒有可處理的照片或影片！")
+            return
+
+        out_dir = self._get_effective_output_dir()
+        if not out_dir:
+            QMessageBox.warning(self, "未指定輸出目錄", "請先選取起點資料夾或自訂輸出資料夾！")
+            return
+
+        # 唯讀網路資料夾防呆檢查
+        if not self._is_dir_writable(out_dir):
+            QMessageBox.critical(
+                self,
+                "輸出目錄無寫入權限",
+                f"所指定的輸出資料夾無法寫入檔案：\n{out_dir}\n\n"
+                f"原因可能是此目錄為唯讀網路磁碟機 (NAS / SMB 共享) 或使用者權限不足。\n"
+                f"請勾選『自訂輸出資料夾』並選擇可寫入的本機磁碟（例如 D:\\ 或 C:\\Users...）！"
+            )
+            self._log(f"【錯誤】輸出目錄無寫入權限，處理中止：{out_dir}")
             return
 
         current_prof_id = self.combo_profile.currentData()
@@ -431,7 +507,6 @@ class MainWindow(QMainWindow):
             max_size_gb=float(self.combo_max_size.currentData()),
         )
 
-        out_dir = node.dir_path
         self.last_output_dir = out_dir
         target_name = node.name.replace(" ", "_")
         res_tag = "8K" if "8k" in prof["id"] else "4K"
