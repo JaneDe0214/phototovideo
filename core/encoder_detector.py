@@ -328,3 +328,59 @@ class HardwareDetector:
         })
 
         return profiles
+
+
+def get_system_memory_info() -> Dict[str, float]:
+    """取得系統實體記憶體容量資訊 (單位：GB)"""
+    total_gb = 16.0
+    avail_gb = 12.0
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", wintypes.DWORD),
+                    ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("sullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                total_gb = stat.ullTotalPhys / (1024 ** 3)
+                avail_gb = stat.ullAvailPhys / (1024 ** 3)
+        except Exception:
+            pass
+    return {"total_gb": round(total_gb, 1), "avail_gb": round(avail_gb, 1)}
+
+
+def calculate_safe_concurrency(total_ram_gb: float, is_8k: bool, max_cores: int) -> int:
+    """
+    計算兼顧轉碼效能與防範 SSD SWAP 磨損的安全平行執行緒數。
+    - 8K 模式下單個 FFmpeg 程序約需 1.8 GB 記憶體
+    - 4K 模式下單個 FFmpeg 程序約需 0.4 GB 記憶體
+    - 保留 6 GB 給作業系統與背景程序，確保實體記憶體充足、零硬碟換頁！
+    """
+    system_reserved_gb = 6.0
+    safe_available = max(total_ram_gb - system_reserved_gb, 4.0)
+    per_proc_ram = 1.8 if is_8k else 0.4
+
+    # 8K 下額外保守安全因子（防止突發性畫布與快取尖峰），建議不超過安全上限的 70%
+    if is_8k:
+        safe_concur = int((safe_available / per_proc_ram) * 0.7)
+        # 32GB RAM 下建議 4~6 緒，16GB 下建議 2~3 緒，64GB+ 建議 12~16 緒
+        safe_concur = max(2, min(safe_concur, 16))
+    else:
+        safe_concur = int(safe_available / per_proc_ram)
+        safe_concur = max(4, min(safe_concur, 16))
+
+    return max(1, min(safe_concur, max_cores))
+

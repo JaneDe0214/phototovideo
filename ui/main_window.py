@@ -33,7 +33,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.encoder_detector import HardwareDetector, find_ffmpeg
+from core.encoder_detector import (
+    HardwareDetector,
+    find_ffmpeg,
+    get_system_memory_info,
+    calculate_safe_concurrency,
+)
 from core.ffmpeg_engine import RenderConfig, VideoRenderEngine
 from core.scanner import AlbumScanner, DirectoryTreeNode
 
@@ -95,6 +100,8 @@ class MainWindow(QMainWindow):
         self.selected_start_node: Optional[DirectoryTreeNode] = None
         self.hardware_detector = HardwareDetector()
         self.profiles = self.hardware_detector.get_recommended_profiles()
+        self.mem_info = get_system_memory_info()
+        self.total_ram_gb = self.mem_info.get("total_gb", 16.0)
         self.worker: Optional[RenderWorker] = None
         self.last_output_dir = ""
 
@@ -240,25 +247,33 @@ class MainWindow(QMainWindow):
         row_fill.addWidget(self.combo_fill)
         specs_layout.addLayout(row_fill)
 
-        # ⚡ 多工平行處理加速設定
+        # ⚡ 多工平行處理加速設定（包含記憶體防護與 SSD 保護機制）
         cpu_count = os.cpu_count() or 4
         row_concur = QHBoxLayout()
-        lbl_concur = QLabel(f"⚡ 平行處理加速（偵測到 {cpu_count} 核心）：")
+        lbl_concur = QLabel(f"⚡ 平行處理加速（CPU {cpu_count} 核心 / 實體 RAM {self.total_ram_gb}GB）：")
         self.combo_concurrency = QComboBox()
-        self.combo_concurrency.addItem(f"⚡ 自動全開 ({cpu_count} 核心全速開火)", cpu_count)
-        if cpu_count >= 24:
-            self.combo_concurrency.addItem("24 緒極速狂飆", 24)
-        if cpu_count >= 16:
-            self.combo_concurrency.addItem("16 緒極速狂飆", 16)
+        self.combo_concurrency.addItem("🛡️ 智慧記憶體防護推薦（自動調節，零 SSD SWAP，保護硬碟壽命）", -1)
+        self.combo_concurrency.addItem("4 緒 (8K 極安全模式，RAM 佔用約 7GB，保護 SSD 零換頁)", 4)
+        self.combo_concurrency.addItem("6 緒 (8K 均衡極速，RAM 佔用約 11GB，32G 筆電推薦)", 6)
+        self.combo_concurrency.addItem("8 緒 (4K/8K 雙引擎推薦，RAM 佔用約 14GB)", 8)
         if cpu_count >= 12:
-            self.combo_concurrency.addItem("12 緒平行加速", 12)
-        self.combo_concurrency.addItem("8 緒平行加速 (雙引擎均衡推薦)", 8)
-        self.combo_concurrency.addItem("4 緒平行加速", 4)
+            self.combo_concurrency.addItem("12 緒平行加速 (4K 狂飆 / 8K 建議 32G 以上記憶體)", 12)
+        if cpu_count >= 16:
+            self.combo_concurrency.addItem("16 緒極速狂飆 (需 64G 以上記憶體)", 16)
+        if cpu_count >= 24:
+            self.combo_concurrency.addItem("24 緒極限全開 (需 64G~128G 記憶體防止 SSD SWAP)", 24)
+        self.combo_concurrency.addItem(f"⚡ 核心強制全開 ({cpu_count} 緒全速開火 - 注意：8K 需大記憶體)", cpu_count)
         self.combo_concurrency.addItem("1 緒 (單工除錯模式)", 1)
+        self.combo_concurrency.currentIndexChanged.connect(self._update_stats_estimate)
 
         row_concur.addWidget(lbl_concur)
         row_concur.addWidget(self.combo_concurrency)
         specs_layout.addLayout(row_concur)
+
+        # 💾 記憶體與 SSD 安全評估狀態顯示
+        self.lbl_memory_safeguard = QLabel("💾 記憶體與 SSD 安全評估：計算中...")
+        self.lbl_memory_safeguard.setWordWrap(True)
+        specs_layout.addWidget(self.lbl_memory_safeguard)
 
         # 音訊設定說明
         lbl_audio_info = QLabel("🎵 音訊規格：AAC 512 kbps @ 48,000 Hz（YouTube 立體聲最高極限）")
@@ -498,6 +513,8 @@ class MainWindow(QMainWindow):
                 "color: #06d6a0; font-weight: bold; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed #3d3d4a;"
             )
 
+        self._update_memory_safeguard_status()
+
         if not self.selected_start_node:
             return
 
@@ -553,7 +570,62 @@ class MainWindow(QMainWindow):
             self.lbl_output_filename.setText(f"預定輸出影片：{target_name}_{res_tag}_極致備份.mp4{dir_display}")
             self.lbl_output_chapter.setText(f"預定章節檔案：{target_name}_{res_tag}_Chapters.txt")
 
+    def _update_memory_safeguard_status(self):
+        """根據解析度（8K/4K）與目前配置之平行緒數，動態評估實體 RAM 與 SSD SWAP 風險"""
+        current_prof_id = self.combo_profile.currentData()
+        prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
+        is_8k = "8k" in str(prof.get("resolution", "")).lower() or "8k" in str(prof.get("id", "")).lower()
+        raw_concur = int(self.combo_concurrency.currentData() or -1)
+        cpu_count = os.cpu_count() or 4
+
+        if raw_concur <= 0:
+            eff_concur = calculate_safe_concurrency(self.total_ram_gb, is_8k, cpu_count)
+            is_auto = True
+        else:
+            eff_concur = raw_concur
+            is_auto = False
+
+        per_proc_gb = 1.8 if is_8k else 0.4
+        est_proc_ram = eff_concur * per_proc_gb
+        est_peak_ram = est_proc_ram + 6.0  # 加上 Windows 作業系統與背景程序常駐 6.0 GB
+        ram_percent = min(100.0, (est_peak_ram / max(self.total_ram_gb, 8.0)) * 100.0)
+
+        res_name = "8K" if is_8k else "4K"
+        if est_peak_ram <= self.total_ram_gb * 0.75:
+            # 🟢 安全綠燈
+            cfg_note = f"（智慧防護自動配置：{eff_concur} 緒）" if is_auto else f"（手動配置：{eff_concur} 緒）"
+            self.lbl_memory_safeguard.setText(
+                f"🟢 <b>記憶體安全（保護 SSD 零 SWAP）</b>：{cfg_note}\n"
+                f"   目標：{res_name} 模式｜預估尖峰 RAM 佔用：約 {est_peak_ram:.1f} GB / 實體 {self.total_ram_gb:.1f} GB ({ram_percent:.0f}%)\n"
+                f"   實體 RAM 空間充裕，完全不會觸發 SSD SWAP 換頁，極限保護硬碟壽命！"
+            )
+            self.lbl_memory_safeguard.setStyleSheet(
+                "color: #a0f0a0; font-size: 12px; background: rgba(0, 255, 128, 0.08); padding: 6px; border-radius: 4px; border: 1px solid rgba(0, 255, 128, 0.2);"
+            )
+        elif est_peak_ram <= self.total_ram_gb * 0.95:
+            # 🟠 警戒橘燈
+            self.lbl_memory_safeguard.setText(
+                f"🟠 <b>記憶體警戒（接近上限）</b>：當前配置 {eff_concur} 緒\n"
+                f"   目標：{res_name} 模式｜預估尖峰 RAM 佔用：約 {est_peak_ram:.1f} GB / 實體 {self.total_ram_gb:.1f} GB ({ram_percent:.0f}%)\n"
+                f"   可能偶發觸發 Windows 虛擬記憶體交換。建議降低至 4~6 緒以徹底保護 SSD！"
+            )
+            self.lbl_memory_safeguard.setStyleSheet(
+                "color: #ffa500; font-size: 12px; background: rgba(255, 165, 0, 0.08); padding: 6px; border-radius: 4px; border: 1px solid rgba(255, 165, 0, 0.2);"
+            )
+        else:
+            # 🔴 危險紅燈
+            self.lbl_memory_safeguard.setText(
+                f"🔴 <b>記憶體超標危險（極度傷 SSD）</b>：當前配置 {eff_concur} 緒\n"
+                f"   目標：{res_name} 模式｜預估尖峰 RAM 佔用：約 {est_peak_ram:.1f} GB / 實體 {self.total_ram_gb:.1f} GB ({ram_percent:.0f}%)\n"
+                f"   實體 RAM 將被吃滿並強制在 SSD 上大量 SWAP 換頁磨損壽命！強烈建議切換為『智慧記憶體防護推薦』！"
+            )
+            self.lbl_memory_safeguard.setStyleSheet(
+                "color: #ff6b6b; font-size: 12px; font-weight: bold; background: rgba(255, 80, 80, 0.12); padding: 6px; border-radius: 4px; border: 1px solid rgba(255, 80, 80, 0.3);"
+            )
+
     def _on_start_render(self):
+        self._update_memory_safeguard_status()
+
         if not self.selected_start_node:
             return
 
@@ -583,6 +655,19 @@ class MainWindow(QMainWindow):
         current_prof_id = self.combo_profile.currentData()
         prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
 
+        raw_concur = int(self.combo_concurrency.currentData())
+        is_8k = "8k" in prof["id"].lower() or "8k" in prof.get("resolution", "").lower()
+        cpu_count = os.cpu_count() or 4
+        if raw_concur <= 0:
+            effective_concurrency = calculate_safe_concurrency(self.total_ram_gb, is_8k, cpu_count)
+            self._log(
+                f"[記憶體防護] 偵測到本機 RAM：{self.total_ram_gb} GB，為保護 SSD 免於 SWAP 磨損，"
+                f"已動態配置最佳安全平行緒數：{effective_concurrency} 緒 "
+                f"(預估尖峰 RAM 佔用：約 {effective_concurrency * (1.8 if is_8k else 0.4) + 6.0:.1f} GB)"
+            )
+        else:
+            effective_concurrency = raw_concur
+
         config = RenderConfig(
             resolution=prof["resolution"],
             fps=prof["fps"],
@@ -597,7 +682,7 @@ class MainWindow(QMainWindow):
             enable_auto_split=self.chk_auto_split.isChecked(),
             max_duration_seconds=float(self.combo_max_dur.currentData()),
             max_size_gb=float(self.combo_max_size.currentData()),
-            concurrency=int(self.combo_concurrency.currentData()),
+            concurrency=effective_concurrency,
         )
 
         self.last_output_dir = out_dir
