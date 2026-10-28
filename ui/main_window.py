@@ -240,15 +240,56 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(group_hw)
 
         # 輸出畫質規格群組
-        group_specs = QGroupBox("🚀 輸出畫質與規格設定（YouTube 最高箱子概念）", self.right_widget)
+        group_specs = QGroupBox("🚀 輸出畫質與規格設定（YouTube 最高箱子概念 · 8K優先）", self.right_widget)
         specs_layout = QVBoxLayout(group_specs)
         specs_layout.setSpacing(8)
 
-        lbl_prof = QLabel("畫質設定檔（預設推薦最高流量與硬體加速）：", group_specs)
+        # 🌟 快速選擇 K 數優先選擇列（首選 8K / 4K 一鍵切換）
+        row_k = QHBoxLayout()
+        lbl_k = QLabel("目標畫質等級（K 數優先）：", group_specs)
+        lbl_k.setStyleSheet("font-weight: bold; color: #00d2ff;")
+        self.btn_preset_8k = QPushButton("🌟 8K 超高畫質（首選推薦 · 7680x4320）", group_specs)
+        self.btn_preset_8k.setCheckable(True)
+        self.btn_preset_8k.setChecked(True)
+        self.btn_preset_8k.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_preset_8k.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b36; border: 1px solid #4a4a5a; border-radius: 6px; color: #ffffff; padding: 6px 12px; font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #0078d4; border: 1px solid #00f2fe; color: #ffffff;
+            }
+        """)
+        self.btn_preset_4k = QPushButton("⚡ 4K 高畫質（極速狂飆 · 3840x2160）", group_specs)
+        self.btn_preset_4k.setCheckable(True)
+        self.btn_preset_4k.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_preset_4k.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b36; border: 1px solid #4a4a5a; border-radius: 6px; color: #ffffff; padding: 6px 12px; font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #0078d4; border: 1px solid #00f2fe; color: #ffffff;
+            }
+        """)
+        self.btn_preset_8k.clicked.connect(self._on_select_8k_preset)
+        self.btn_preset_4k.clicked.connect(self._on_select_4k_preset)
+        row_k.addWidget(lbl_k)
+        row_k.addWidget(self.btn_preset_8k)
+        row_k.addWidget(self.btn_preset_4k)
+        specs_layout.addLayout(row_k)
+
+        lbl_prof = QLabel("詳細編碼核心設定檔（支援自動平滑降級，遇限制不中斷）：", group_specs)
         self.combo_profile = QComboBox(group_specs)
-        for prof in self.profiles:
-            self.combo_profile.addItem(f"{prof['name']} - {prof['tag']}", prof["id"])
-        self.combo_profile.currentIndexChanged.connect(self._update_stats_estimate)
+        self.combo_profile.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_profile.setMinimumContentsLength(20)
+        self.combo_profile.view().setMinimumWidth(580)
+        self.combo_profile.setMaxVisibleItems(10)
+
+        for idx, prof in enumerate(self.profiles):
+            self.combo_profile.addItem(prof["name"], prof["id"])
+            self.combo_profile.setItemData(idx, prof.get("tag", ""), Qt.ItemDataRole.ToolTipRole)
+
+        self.combo_profile.currentIndexChanged.connect(self._on_profile_combo_changed)
         specs_layout.addWidget(lbl_prof)
         specs_layout.addWidget(self.combo_profile)
 
@@ -1026,18 +1067,45 @@ class MainWindow(QMainWindow):
         self.btn_add_to_queue.setEnabled(True)
         self._update_stats_estimate()
 
+    def _on_select_8k_preset(self):
+        """一鍵選定 8K 超高畫質首選設定檔"""
+        self.btn_preset_8k.setChecked(True)
+        self.btn_preset_4k.setChecked(False)
+        for idx, prof in enumerate(self.profiles):
+            if "8k" in prof["id"].lower() or "8k" in prof.get("resolution", "").lower():
+                self.combo_profile.setCurrentIndex(idx)
+                break
+
+    def _on_select_4k_preset(self):
+        """一鍵選定 4K 高畫質設定檔"""
+        self.btn_preset_4k.setChecked(True)
+        self.btn_preset_8k.setChecked(False)
+        for idx, prof in enumerate(self.profiles):
+            if "4k" in prof["id"].lower() or "4k" in prof.get("resolution", "").lower():
+                self.combo_profile.setCurrentIndex(idx)
+                break
+
+    def _on_profile_combo_changed(self):
+        """當使用者微調下拉選單時，同步更新 K 數切換鈕與狀態評估"""
+        current_prof_id = self.combo_profile.currentData()
+        prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
+        is_8k = "8k" in prof["id"].lower() or "8k" in prof.get("resolution", "").lower()
+        self.btn_preset_8k.setChecked(is_8k)
+        self.btn_preset_4k.setChecked(not is_8k)
+        self._update_stats_estimate()
+
     def _update_stats_estimate(self):
         current_prof_id = self.combo_profile.currentData()
         prof = next((p for p in self.profiles if p["id"] == current_prof_id), self.profiles[0])
         hw_type = prof.get("hw_type", "硬體加速")
         is_cpu = "CPU" in hw_type
         if is_cpu:
-            self.lbl_active_hw_status.setText(f"🎯 目前選取：🟡【{hw_type} 軟體計算中（視覺無損/耗時較長）】")
+            self.lbl_active_hw_status.setText(f"🎯 目前選取：🟡【{hw_type} 軟體運算（視覺無損 · 100% 穩定相容）】")
             self.lbl_active_hw_status.setStyleSheet(
                 "color: #ffd166; font-weight: bold; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed #3d3d4a;"
             )
         else:
-            self.lbl_active_hw_status.setText(f"🎯 目前選取：🟢【{hw_type} 硬體極速加速中（速度最快）】")
+            self.lbl_active_hw_status.setText(f"🎯 目前選取：🟢【{hw_type} 硬體極速加速（遇顯存限制自動切換同畫質軟解，絕不中斷）】")
             self.lbl_active_hw_status.setStyleSheet(
                 "color: #06d6a0; font-weight: bold; font-size: 13px; margin-top: 4px; padding-top: 4px; border-top: 1px dashed #3d3d4a;"
             )

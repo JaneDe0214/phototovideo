@@ -74,6 +74,10 @@ def find_ffmpeg() -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+_CACHED_SUPPORTED = None
+_CACHED_DETAILS = None
+
+
 class HardwareDetector:
     """硬體真實能力探測器"""
 
@@ -112,7 +116,7 @@ class HardwareDetector:
                 encoding="utf-8",
                 errors="ignore",
                 startupinfo=startupinfo,
-                timeout=3,
+                timeout=0.8,
             )
             if res_proc.returncode == 0:
                 return True, "支援"
@@ -127,7 +131,14 @@ class HardwareDetector:
             return False, str(e)
 
     def _probe_real_hardware(self):
-        """對所有主流硬體編碼器進行動態沙盒實測"""
+        """對所有主流硬體編碼器進行動態沙盒實測（支援記憶體快取加速，絕不卡死 UI）"""
+        global _CACHED_SUPPORTED, _CACHED_DETAILS
+        if _CACHED_SUPPORTED is not None and _CACHED_DETAILS is not None:
+            self.supported_hardware = dict(_CACHED_SUPPORTED)
+            self.hardware_details = dict(_CACHED_DETAILS)
+            self.available_encoders = [k for k, v in self.supported_hardware.items() if v]
+            return
+
         probes = [
             ("av1_qsv", "Intel Arc AV1 硬體編碼 (Core Ultra 255H/155H 等)"),
             ("hevc_qsv", "Intel QSV HEVC 硬體編碼 (UHD 770 / Core Ultra)"),
@@ -145,6 +156,8 @@ class HardwareDetector:
             self.supported_hardware[codec] = ok
             self.hardware_details[codec] = msg
 
+        _CACHED_SUPPORTED = dict(self.supported_hardware)
+        _CACHED_DETAILS = dict(self.hardware_details)
         # 保持向下相容性清單
         self.available_encoders = [k for k, v in self.supported_hardware.items() if v]
 
@@ -227,15 +240,22 @@ class HardwareDetector:
     def get_recommended_profiles(self) -> List[Dict]:
         """
         傳回當前電腦「真正支援且經過動態實測可用」的輸出規格清單。
-        依照效能與畫質自動最佳排序，預設第一項保證絕對能順暢執行！
+        【8K 畫質第一優先原則】：無論硬體或 CPU，8K 規格一律排在最前面！
+        排序層次：
+        1. 8K 硬體加速 (Intel Arc AV1 / Intel QSV HEVC / NVIDIA NVENC / AMD AMF)
+        2. 8K CPU 軟體無損運算 (libx265 - 全電腦通用保底)
+        3. 4K 硬體加速
+        4. 4K CPU 軟體運算
+        預設第一項必定為當前電腦可勝任之最佳 8K 畫質！
         """
-        profiles = []
+        profiles_8k = []
+        profiles_4k = []
 
-        # 1. 檢查 Intel Arc AV1 (Core Ultra 255H / 155H 專屬)
+        # 1. 檢查 Intel Arc AV1 (Core Ultra 255H / 155H 等)
         if self.supported_hardware.get("av1_qsv", False):
-            profiles.append({
+            profiles_8k.append({
                 "id": "8k_qsv_av1",
-                "name": "【8K 極速旗艦】8K 60FPS (Intel Arc AV1 10-bit, 240Mbps)",
+                "name": "🌟【8K 旗艦】8K 60FPS (Intel Arc AV1 10-bit, 240Mbps)",
                 "resolution": "7680x4320",
                 "fps": 60,
                 "vcodec": "av1_qsv",
@@ -244,15 +264,14 @@ class HardwareDetector:
                 "maxrate": "260M",
                 "bufsize": "480M",
                 "hw_type": "Intel Arc QSV",
-                "tag": "[推薦] 255H 筆電最佳推薦 (AV1 硬體狂飆)",
+                "tag": "[推薦] 255H 筆電最佳 (AV1 硬體狂飆)",
             })
 
-        # 2. 檢查 Intel QSV HEVC (UHD 770 桌機與 255H 筆電均完美支援！)
+        # 2. 檢查 Intel QSV HEVC (UHD 770 桌機與 255H 筆電均支援)
         if self.supported_hardware.get("hevc_qsv", False):
-            # 8K HEVC QSV
-            profiles.append({
+            profiles_8k.append({
                 "id": "8k_qsv_hevc",
-                "name": "【8K 極速旗艦】8K 60FPS (Intel QSV HEVC 10-bit, 240Mbps)",
+                "name": "🌟【8K 旗艦】8K 60FPS (Intel QSV HEVC 10-bit, 240Mbps)",
                 "resolution": "7680x4320",
                 "fps": 60,
                 "vcodec": "hevc_qsv",
@@ -261,12 +280,11 @@ class HardwareDetector:
                 "maxrate": "260M",
                 "bufsize": "480M",
                 "hw_type": "Intel QSV",
-                "tag": "[推薦] UHD 770 / 255H 8K 雙引擎極速推薦",
+                "tag": "[推薦] UHD 770 / 255H 8K 雙引擎極速 (遇限制自動平滑軟解)",
             })
-            # 4K HEVC QSV
-            profiles.append({
+            profiles_4k.append({
                 "id": "4k_qsv_hevc",
-                "name": "【4K 極速狂飆】4K 60FPS (Intel QSV HEVC 10-bit, 100Mbps)",
+                "name": "⚡【4K 狂飆】4K 60FPS (Intel QSV HEVC 10-bit, 100Mbps)",
                 "resolution": "3840x2160",
                 "fps": 60,
                 "vcodec": "hevc_qsv",
@@ -280,9 +298,9 @@ class HardwareDetector:
 
         # 3. 檢查 NVIDIA NVENC
         if self.supported_hardware.get("av1_nvenc", False):
-            profiles.append({
+            profiles_8k.append({
                 "id": "8k_nvenc_av1",
-                "name": "【8K 極速旗搞笑】8K 60FPS (NVIDIA NVENC AV1 10-bit, 240Mbps)",
+                "name": "🌟【8K 旗艦】8K 60FPS (NVIDIA NVENC AV1 10-bit, 240Mbps)",
                 "resolution": "7680x4320",
                 "fps": 60,
                 "vcodec": "av1_nvenc",
@@ -294,9 +312,9 @@ class HardwareDetector:
                 "tag": "[推薦] RTX 40系列顯卡極速推薦",
             })
         elif self.supported_hardware.get("hevc_nvenc", False):
-            profiles.append({
+            profiles_8k.append({
                 "id": "8k_nvenc_hevc",
-                "name": "【8K 極速旗艦】8K 60FPS (NVIDIA NVENC HEVC 10-bit, 240Mbps)",
+                "name": "🌟【8K 旗艦】8K 60FPS (NVIDIA NVENC HEVC 10-bit, 240Mbps)",
                 "resolution": "7680x4320",
                 "fps": 60,
                 "vcodec": "hevc_nvenc",
@@ -307,12 +325,25 @@ class HardwareDetector:
                 "hw_type": "NVIDIA NVENC",
                 "tag": "[推薦] NVIDIA 顯卡硬體加速",
             })
+            profiles_4k.append({
+                "id": "4k_nvenc_hevc",
+                "name": "⚡【4K 狂飆】4K 60FPS (NVIDIA NVENC HEVC 10-bit, 100Mbps)",
+                "resolution": "3840x2160",
+                "fps": 60,
+                "vcodec": "hevc_nvenc",
+                "pix_fmt": "p010le",
+                "bitrate": "100M",
+                "maxrate": "120M",
+                "bufsize": "200M",
+                "hw_type": "NVIDIA NVENC",
+                "tag": "NVIDIA 顯卡 4K 極速",
+            })
 
         # 4. 檢查 AMD AMF
         if self.supported_hardware.get("hevc_amf", False):
-            profiles.append({
+            profiles_8k.append({
                 "id": "8k_amf_hevc",
-                "name": "【8K 極速旗艦】8K 60FPS (AMD AMF HEVC 10-bit, 240Mbps)",
+                "name": "🌟【8K 旗艦】8K 60FPS (AMD AMF HEVC 10-bit, 240Mbps)",
                 "resolution": "7680x4320",
                 "fps": 60,
                 "vcodec": "hevc_amf",
@@ -323,11 +354,24 @@ class HardwareDetector:
                 "hw_type": "AMD AMF",
                 "tag": "[推薦] AMD Radeon 顯卡硬體加速",
             })
+            profiles_4k.append({
+                "id": "4k_amf_hevc",
+                "name": "⚡【4K 狂飆】4K 60FPS (AMD AMF HEVC 10-bit, 100Mbps)",
+                "resolution": "3840x2160",
+                "fps": 60,
+                "vcodec": "hevc_amf",
+                "pix_fmt": "p010le",
+                "bitrate": "100M",
+                "maxrate": "120M",
+                "bufsize": "200M",
+                "hw_type": "AMD AMF",
+                "tag": "AMD Radeon 顯卡 4K 極速",
+            })
 
-        # 5. 全電腦通用保底：CPU 軟體無損級 (任何電腦均可執行)
-        profiles.append({
+        # 5. 【8K CPU 軟體無損運算】緊接在 8K 硬體之後，確保 8K 畫質優先！
+        profiles_8k.append({
             "id": "8k_cpu_hevc",
-            "name": "【8K 極致畫質 (CPU 軟體運算)】8K 60FPS (HEVC 10-bit, 240Mbps)",
+            "name": "🌟【8K 極致 (CPU 軟體運算)】8K 60FPS (HEVC 10-bit, 240Mbps)",
             "resolution": "7680x4320",
             "fps": 60,
             "vcodec": "libx265",
@@ -336,12 +380,13 @@ class HardwareDetector:
             "maxrate": "260M",
             "bufsize": "480M",
             "hw_type": "CPU (libx265)",
-            "tag": "全電腦通用 / 視覺無損最高畫質 (適合夜間掛機)",
+            "tag": "全電腦通用 / 視覺無損最高畫質 (適合夜間掛機 / 100% 穩定相容)",
         })
 
-        profiles.append({
+        # 6. 【4K CPU 軟體運算】
+        profiles_4k.append({
             "id": "4k_cpu_hevc",
-            "name": "【4K 極致畫質 (CPU 軟體運算)】4K 60FPS (HEVC 10-bit, 100Mbps)",
+            "name": "⚡【4K 極致 (CPU 軟體運算)】4K 60FPS (HEVC 10-bit, 100Mbps)",
             "resolution": "3840x2160",
             "fps": 60,
             "vcodec": "libx265",
@@ -350,10 +395,11 @@ class HardwareDetector:
             "maxrate": "120M",
             "bufsize": "200M",
             "hw_type": "CPU (libx265)",
-            "tag": "全電腦通用",
+            "tag": "全電腦通用 (相容性佳)",
         })
 
-        return profiles
+        # 合併清單：8K 規格永遠絕對優先排在最前！
+        return profiles_8k + profiles_4k
 
 
 def get_system_memory_info() -> Dict[str, float]:
