@@ -118,8 +118,10 @@ class ChapterGenerator:
             if item.category and item.category != current_category:
                 current_category = item.category
                 lines.append(f"\n--- 【{item.category}】 ---")
-
-            lines.append(f"{ts_str} {type_tag}{item.title}")
+                # 在子資料夾首張時間軸上明確冠上資料夾標題，保證 YouTube 進度條 100% 浮現景點名稱！
+                lines.append(f"{ts_str} 📁【{item.category}】{type_tag}{item.title}")
+            else:
+                lines.append(f"{ts_str} {type_tag}{item.title}")
 
         lines.append("\n==========================================")
         if is_condensed:
@@ -201,10 +203,12 @@ class ChapterGenerator:
             if gap >= 10.0:
                 filtered_items.append(it)
             else:
-                # 若間隔小於 10 秒，若當前是影片或大分類，優先保留它，替換掉前一個相片
-                if (it.is_video or it.is_category_start) and not (
-                    prev.is_video or prev.is_category_start
-                ):
+                # 若間隔小於 10 秒：
+                # 【子資料夾切換 100% 絕對保留】：若為子資料夾起點，強制保留並微調至少 10 秒間隔，確保 YouTube 成功辨識！
+                if it.is_category_start:
+                    it.start_seconds = prev.start_seconds + 10.0
+                    filtered_items.append(it)
+                elif it.is_video and not (prev.is_video or prev.is_category_start):
                     filtered_items[-1] = it
 
         # 6. 字數安全最終鉗制（Hard Clamp）

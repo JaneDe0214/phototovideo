@@ -785,14 +785,29 @@ class VideoRenderEngine:
         pix_fmt = "nv12" if "qsv" in vcodec else "yuv420p"
 
         preset_args = []
+        quality_args = []
         if "qsv" in vcodec:
             preset_args = ["-preset", "veryfast"]
+            quality_args = ["-global_quality", "16"]
         elif "nvenc" in vcodec:
             preset_args = ["-preset", "p2"]
+            quality_args = ["-cq", "16"]
         elif "amf" in vcodec:
             preset_args = ["-quality", "speed"]
-        elif "libx265" in vcodec or "libx264" in vcodec:
+        elif "libx265" in vcodec:
             preset_args = ["-preset", "faster"]
+            quality_args = ["-crf", "14"]
+        elif "libx264" in vcodec:
+            preset_args = ["-preset", "faster"]
+            quality_args = ["-crf", "16"]
+
+        # 專業 YouTube 官方最低失真色彩對齊標籤 (防止二轉色偏、黑階上浮)
+        color_args = [
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
+            "-colorspace", "bt709",
+            "-color_range", "tv",
+        ]
 
         filter_complex = (
             f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd,"
@@ -813,6 +828,8 @@ class VideoRenderEngine:
             "-map", "[v]",
             "-map", "1:a",
             *preset_args,
+            *quality_args,
+            *color_args,
             "-c:v", vcodec,
             "-b:v", bitrate,
             "-maxrate", maxrate,
