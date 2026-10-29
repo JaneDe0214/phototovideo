@@ -124,7 +124,7 @@ class VideoRenderEngine:
                 encoding="utf-8",
                 errors="ignore",
                 startupinfo=startupinfo,
-                timeout=1.2,
+                timeout=3.0,
             )
             if res_proc.returncode == 0:
                 self._tested_codecs[key] = (True, "支援")
@@ -380,6 +380,8 @@ class VideoRenderEngine:
             except Exception:
                 pass
 
+        pix_fmt_args = ["-pix_fmt", "nv12"] if "qsv" in self.config.vcodec else ["-pix_fmt", "yuv420p"]
+
         cmd = [
             self.ffmpeg_path,
             "-y",
@@ -391,6 +393,7 @@ class VideoRenderEngine:
             "-i", f"anullsrc=r=48000:cl=stereo",
             "-vf", f"scale={w}:{h}",
             "-c:v", self.config.vcodec,
+            *pix_fmt_args,
             "-c:a", "aac",
             "-t", str(duration),
             output_file,
@@ -549,18 +552,43 @@ class VideoRenderEngine:
                 effective_vcodec, self.config.width, self.config.height, test_pix_fmt
             )
             if not hw_ok:
-                effective_vcodec = "libx265"
-                self._active_fallback_codec = "libx265"
-                if is_8k:
-                    effective_bitrate = "180M"
-                    effective_maxrate = "200M"
-                    effective_bufsize = "360M"
-                if log_callback:
-                    log_callback(
-                        f"💡【智慧相容無感切換】偵測到目前顯示卡硬體在 {self.config.resolution} 模式下存在顯存/驅動限制（{hw_msg}）；\n"
-                        f"系統已自動為您無縫平滑切換至【{('8K' if is_8k else '4K')} 同畫質 CPU 軟體無損運算 ({effective_vcodec})】！\n"
-                        f"維持 100% 同等頂級畫質持續渲染，絕不中斷！\n"
+                # 第一級智慧硬體降級：若 AV1 硬體編碼受限，優先切換至成熟的 HEVC 硬體加速（同為 GPU 極速運算）！
+                fallback_hw = None
+                if "av1_qsv" in effective_vcodec:
+                    fallback_hw = "hevc_qsv"
+                elif "av1_nvenc" in effective_vcodec:
+                    fallback_hw = "hevc_nvenc"
+                elif "av1_amf" in effective_vcodec:
+                    fallback_hw = "hevc_amf"
+
+                if fallback_hw:
+                    hw2_ok, hw2_msg = self._test_hardware_encode_capability(
+                        fallback_hw, self.config.width, self.config.height, test_pix_fmt
                     )
+                    if hw2_ok:
+                        effective_vcodec = fallback_hw
+                        self._active_fallback_codec = fallback_hw
+                        if log_callback:
+                            log_callback(
+                                f"💡【GPU 硬體智慧調優】偵測到 8K AV1 在當前顯示卡驅動下存在規格限制（{hw_msg}）；\n"
+                                f"系統已自動切換至【Intel Arc/QSV HEVC GPU 硬體極速加速 ({fallback_hw})】！\n"
+                                f"維持 100% GPU 硬體高傳輸極速渲染，充分釋放 255H GPU 運算能力！\n"
+                            )
+
+                # 第二級終極保底：只有在 GPU 硬體編碼完全不可用時，才降級至 CPU 軟解
+                if not hw_ok and effective_vcodec == (self._active_fallback_codec or self.config.vcodec) and ("libx265" not in effective_vcodec):
+                    effective_vcodec = "libx265"
+                    self._active_fallback_codec = "libx265"
+                    if is_8k:
+                        effective_bitrate = "180M"
+                        effective_maxrate = "200M"
+                        effective_bufsize = "360M"
+                    if log_callback:
+                        log_callback(
+                            f"💡【智慧相容無感切換】偵測到目前顯示卡硬體在 {self.config.resolution} 模式下存在顯存/驅動限制（{hw_msg}）；\n"
+                            f"系統已自動為您無縫平滑切換至【{('8K' if is_8k else '4K')} 同畫質 CPU 軟體無損運算 ({effective_vcodec})】！\n"
+                            f"維持 100% 同等頂級畫質持續渲染，絕不中斷！\n"
+                        )
 
         try:
             startupinfo = None
@@ -950,8 +978,8 @@ class VideoRenderEngine:
 
                     if ret_code == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
                         if plan_idx > 0:
-                            if "CPU" in plan_name or codec == "libx265":
-                                self._active_fallback_codec = "libx265"
+                            if "hevc_qsv" in codec or "hevc_nvenc" in codec or "hevc_amf" in codec:
+                                self._active_fallback_codec = codec
                             if log_callback:
                                 log_callback(
                                     f"✓【自動修復成功】相片『{item.file_name}』已透過【{plan_name}】成功收錄！"
@@ -1087,8 +1115,8 @@ class VideoRenderEngine:
 
                 if e_ret == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
                     if plan_idx > 0:
-                        if "CPU" in plan_name or codec == "libx265":
-                            self._active_fallback_codec = "libx265"
+                        if "hevc_qsv" in codec or "hevc_nvenc" in codec or "hevc_amf" in codec:
+                            self._active_fallback_codec = codec
                         if log_callback:
                             log_callback(
                                 f"✓【自動修復成功】相片『{item.file_name}』已透過【{plan_name}】成功收錄！"
@@ -1219,8 +1247,8 @@ class VideoRenderEngine:
 
             if v_ret == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
                 if plan_idx > 0:
-                    if "CPU" in plan_name or codec == "libx265":
-                        self._active_fallback_codec = "libx265"
+                    if "hevc_qsv" in codec or "hevc_nvenc" in codec or "hevc_amf" in codec:
+                        self._active_fallback_codec = codec
                     if log_callback:
                         log_callback(
                             f"✓【自動修復成功】影片『{item.file_name}』已透過【{plan_name}】成功收錄！"

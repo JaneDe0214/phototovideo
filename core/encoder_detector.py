@@ -98,12 +98,19 @@ class HardwareDetector:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+        pix_fmt_args = []
+        if "qsv" in codec:
+            pix_fmt_args = ["-pix_fmt", "nv12"]
+        elif "nvenc" in codec or "amf" in codec:
+            pix_fmt_args = ["-pix_fmt", "yuv420p"]
+
         cmd = [
             self.ffmpeg_path,
             "-v", "error",
             "-f", "lavfi",
             "-i", f"color=c=black:s={res}:d=0.05",
             "-c:v", codec,
+            *pix_fmt_args,
             "-f", "null",
             "-",
         ]
@@ -116,7 +123,7 @@ class HardwareDetector:
                 encoding="utf-8",
                 errors="ignore",
                 startupinfo=startupinfo,
-                timeout=0.8,
+                timeout=3.0,
             )
             if res_proc.returncode == 0:
                 return True, "支援"
@@ -251,23 +258,7 @@ class HardwareDetector:
         profiles_8k = []
         profiles_4k = []
 
-        # 1. 檢查 Intel Arc AV1 (Core Ultra 255H / 155H 等)
-        if self.supported_hardware.get("av1_qsv", False):
-            profiles_8k.append({
-                "id": "8k_qsv_av1",
-                "name": "🌟【8K 旗艦】8K 60FPS (Intel Arc AV1 10-bit, 240Mbps)",
-                "resolution": "7680x4320",
-                "fps": 60,
-                "vcodec": "av1_qsv",
-                "pix_fmt": "p010le",
-                "bitrate": "240M",
-                "maxrate": "260M",
-                "bufsize": "480M",
-                "hw_type": "Intel Arc QSV",
-                "tag": "[推薦] 255H 筆電最佳 (AV1 硬體狂飆)",
-            })
-
-        # 2. 檢查 Intel QSV HEVC (UHD 770 桌機與 255H 筆電均支援)
+        # 1. 檢查 Intel QSV HEVC (Core Ultra 255H/155H 筆電與 UHD 770 桌機均支援，8K 成熟度最高)
         if self.supported_hardware.get("hevc_qsv", False):
             profiles_8k.append({
                 "id": "8k_qsv_hevc",
@@ -280,11 +271,11 @@ class HardwareDetector:
                 "maxrate": "260M",
                 "bufsize": "480M",
                 "hw_type": "Intel QSV",
-                "tag": "[推薦] UHD 770 / 255H 8K 雙引擎極速 (遇限制自動平滑軟解)",
+                "tag": "[首選推薦] 255H 筆電 / UHD 770 雙 MFX 引擎 8K 極速硬體加速",
             })
             profiles_4k.append({
                 "id": "4k_qsv_hevc",
-                "name": "⚡【4K 狂飆】4K 60FPS (Intel QSV HEVC 10-bit, 100Mbps)",
+                "name": "⚡【4K 極速】4K 60FPS (Intel QSV HEVC 10-bit, 100Mbps)",
                 "resolution": "3840x2160",
                 "fps": 60,
                 "vcodec": "hevc_qsv",
@@ -294,6 +285,36 @@ class HardwareDetector:
                 "bufsize": "200M",
                 "hw_type": "Intel QSV",
                 "tag": "超快速幾分鐘完成 (YouTube 給予 VP9/AV1 高位元率)",
+            })
+
+        # 2. 檢查 Intel Arc AV1 (Core Ultra 255H / 155H 等 Intel Arc GPU)
+        if self.supported_hardware.get("av1_qsv", False):
+            profiles_8k.append({
+                "id": "8k_qsv_av1",
+                "name": "🌟【8K 進階】8K 60FPS (Intel Arc AV1 10-bit, 240Mbps)",
+                "resolution": "7680x4320",
+                "fps": 60,
+                "vcodec": "av1_qsv",
+                "pix_fmt": "p010le",
+                "bitrate": "240M",
+                "maxrate": "260M",
+                "bufsize": "480M",
+                "hw_type": "Intel Arc QSV",
+                "tag": "[高階] 255H 筆電 AV1 硬體加速 (若遇驅動限制自動轉HEVC硬解)",
+            })
+            # 4K 下 AV1 為最佳首選
+            profiles_4k.insert(0, {
+                "id": "4k_qsv_av1",
+                "name": "⚡【4K 狂飆】4K 60FPS (Intel Arc AV1 10-bit, 100Mbps)",
+                "resolution": "3840x2160",
+                "fps": 60,
+                "vcodec": "av1_qsv",
+                "pix_fmt": "p010le",
+                "bitrate": "100M",
+                "maxrate": "120M",
+                "bufsize": "200M",
+                "hw_type": "Intel Arc QSV",
+                "tag": "[推薦] 255H 筆電 4K AV1 硬體極速 (YouTube 免二次轉碼)",
             })
 
         # 3. 檢查 NVIDIA NVENC
