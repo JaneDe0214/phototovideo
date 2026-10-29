@@ -1,3 +1,9 @@
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
 """
 FFmpeg 8K/4K 極致品質影片渲染引擎
 支援智慧毛玻璃填充、Lanczos 頂級縮放、48kHz 512kbps 最高音訊規格、
@@ -340,14 +346,30 @@ class VideoRenderEngine:
     def _test_single_render(
         self, item: MediaItem, output_file: str, duration: float, startupinfo
     ) -> Tuple[bool, str]:
-        """試跑渲染測試"""
+        """試跑渲染測試 (支援 HEIC 影像前置解碼)"""
         w, h = 640, 360  # 測試用低解析度快速驗證
+        source_image_path = item.file_path
+        temp_heic = None
+        ext = os.path.splitext(item.file_name)[1].lower()
+        if ext in (".heic", ".heif"):
+            try:
+                from PIL import Image, ImageOps
+                with Image.open(item.file_path) as im:
+                    im = ImageOps.exif_transpose(im)
+                    if im.mode not in ("RGB", "RGBA"):
+                        im = im.convert("RGB")
+                    temp_heic = output_file + ".preflight_heic.png"
+                    im.save(temp_heic, "PNG")
+                    source_image_path = temp_heic
+            except Exception:
+                pass
+
         cmd = [
             self.ffmpeg_path,
             "-y",
             "-loop", "1",
             "-t", str(duration),
-            "-i", item.file_path,
+            "-i", source_image_path,
             "-f", "lavfi",
             "-t", str(duration),
             "-i", f"anullsrc=r=48000:cl=stereo",
@@ -376,6 +398,12 @@ class VideoRenderEngine:
             return False, err.split("\n")[-1] if err else "未知錯誤"
         except Exception as e:
             return False, str(e)
+        finally:
+            if temp_heic and os.path.exists(temp_heic):
+                try:
+                    os.remove(temp_heic)
+                except Exception:
+                    pass
 
     def render_album_to_video(
         self,
@@ -749,6 +777,7 @@ class VideoRenderEngine:
         bitrate: str,
         maxrate: str,
         bufsize: str,
+        img_path_override: Optional[str] = None,
     ) -> List[str]:
         """組裝黑邊模式下單幀降頻縮放之 FFmpeg 直通管線指令"""
         w, h = self.config.width, self.config.height
@@ -776,7 +805,7 @@ class VideoRenderEngine:
             "-loop", "1",
             "-framerate", "1",
             "-t", str(duration),
-            "-i", item.file_path,
+            "-i", img_path_override or item.file_path,
             "-f", "lavfi",
             "-t", str(duration),
             "-i", f"anullsrc=r={self.config.audio_samplerate}:cl=stereo",
@@ -810,107 +839,122 @@ class VideoRenderEngine:
         active_codec: Optional[str] = None,
     ) -> bool:
         """
-        相片高畫質渲染架構（內建四階段自癒重試修復體系）：
-        1. 純黑邊留白（預設）：零磁碟 I/O 直通單一程序管線，極限保護 SSD 壽命！
-        2. 自癒修復體系：若遇 GPU 顯存擠壓衝突（如 Error allocating the output packet），
-           自動進行自適應重試、成熟硬體降級與 CPU 軟體無損保底修復，絕對不跳過任何相片！
-        3. 毛玻璃背景：兩階段單幀預渲染架構。
+        相片高畫質渲染架構（內建 iPhone HEIC/HEIF 智慧無損解碼 ＋ 四階段自癒重試修復體系）：
+        1. HEIC/HEIF 原生相容：自動使用 Pillow/pillow-heif 進行無損解碼與 EXIF 方向校正，
+           徹底解決 FFmpeg 無法解碼 iPhone HEIC 照片造成所有方案均失敗的致命問題！
+        2. 純黑邊留白（預設）：零磁碟 I/O 直通單一程序管線，極限保護 SSD 壽命！
+        3. 自癒修復體系：若遇 GPU 顯存擠壓衝突，自動切換 8K 同畫質 libx265 軟解，絕對不跳過！
         """
         w, h = self.config.width, self.config.height
         fps = self.config.fps
         pix_fmt = "nv12" if "qsv" in self.config.vcodec else "yuv420p"
 
-        # 模式一：純黑邊留白（零 SSD 磁碟 I/O 直通渲染 ＋ 四階段智慧自癒修復體系）
-        if self.config.fill_mode == "black":
-            cur_vcodec = active_codec or self._active_fallback_codec or self.config.vcodec
-            is_8k = self.config.width >= 7000
-            cpu_fallback_codec = "libx265"
-            cpu_br = "160M" if is_8k else "80M"
-            cpu_mr = "180M" if is_8k else "100M"
-            cpu_buf = "320M" if is_8k else "160M"
-
-            # 建立同畫質智慧多層級自癒嘗試方案：
-            # (方案名稱, 編碼器, 位元率, maxrate, bufsize, 冷卻延遲秒數)
-            plans = [
-                ("首選編碼器直通", cur_vcodec, self.config.bitrate, self.config.maxrate, self.config.bufsize, 0.0),
-                ("自適應顯存調節 (防顯存擠壓)", cur_vcodec, self.config.bitrate, "120M", "100M", 0.2),
-            ]
-
-            # 若原為 av1 硬體編碼，加入成熟穩定的 hevc 硬體備援
-            if "av1" in cur_vcodec:
-                fallback_hw = "hevc_qsv" if "qsv" in cur_vcodec else "hevc_nvenc"
-                plans.append((f"切換至成熟硬體加速 ({fallback_hw})", fallback_hw, self.config.bitrate, "120M", "100M", 0.1))
-
-            # 終極同畫質保底修復：【同解析度 CPU 軟體無損修復 (libx265)】
-            # 保持相同 8K/4K 畫質，100% 相容 Concat 封裝，絕對不跳過、不中斷！
-            plans.append((
-                f"{'8K' if is_8k else '4K'} 同畫質 CPU 軟體無損保底修復 ({cpu_fallback_codec})",
-                cpu_fallback_codec, cpu_br, cpu_mr, cpu_buf, 0.0
-            ))
-
-            last_error_detail = "未知錯誤"
-            for plan_idx, (plan_name, codec, br, mr, buf, delay) in enumerate(plans):
-                if self._is_cancelled:
-                    return False
-
-                if delay > 0:
-                    time.sleep(delay)
-
-                cmd_encode = self._build_image_encode_cmd(
-                    item, output_file, duration, codec, br, mr, buf
-                )
-                ret_code, stdout, stderr = self._run_command_cancellable(
-                    cmd_encode, startupinfo=startupinfo
-                )
-                if self._is_cancelled:
-                    return False
-
-                if ret_code == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
-                    if plan_idx > 0:
-                        if "CPU" in plan_name or codec == "libx265":
-                            self._active_fallback_codec = "libx265"
-                        if log_callback:
-                            log_callback(
-                                f"✓【自動修復成功】相片『{item.file_name}』已透過【{plan_name}】成功收錄！"
-                            )
-                    return True
-
-                # 擷取關鍵錯誤原因
-                err_lines = [
-                    line.strip()
-                    for line in stderr.split("\n")
-                    if line.strip() and ("error" in line.lower() or "unsupported" in line.lower() or "allocat" in line.lower() or "failed" in line.lower())
-                ]
-                last_error_detail = err_lines[0] if err_lines else (stderr.strip().split("\n")[-1] if stderr else "執行失敗")
-
-                # 若還有下一個方案，記錄修復嘗試
-                if plan_idx < len(plans) - 1 and log_callback:
-                    next_plan_name = plans[plan_idx + 1][0]
-                    log_callback(
-                        f"⚠️【自動修復中】相片『{item.file_name}』遇到編碼異常（{last_error_detail}），"
-                        f"系統正在自動切換至【{next_plan_name}】重試修復..."
-                    )
-
-            if log_callback:
-                log_callback(f"【嚴重錯誤】相片『{item.file_name}』所有修復方案均失敗 -> 原因：{last_error_detail}")
-            return False
-
-        # 模式二：毛玻璃高斯模糊背景（兩階段預渲染架構）
-        filter_complex = (
-            f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase:flags=bicubic,"
-            f"crop={w}:{h},boxblur=40:5[bg];"
-            f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
-        )
-
-        canvas_file = output_file + ".canvas.png"
+        temp_heic_converted = None
+        canvas_file = None
+        source_image_path = item.file_path
 
         try:
+            # 檢查是否為 iPhone HEIC / HEIF 照片，若是則先行進行無損前置解碼 (保留完整色彩並校正 EXIF 旋轉)
+            ext_lower = os.path.splitext(item.file_name)[1].lower()
+            if ext_lower in (".heic", ".heif"):
+                try:
+                    from PIL import Image, ImageOps
+                    with Image.open(item.file_path) as im:
+                        im = ImageOps.exif_transpose(im)
+                        if im.mode not in ("RGB", "RGBA"):
+                            im = im.convert("RGB")
+                        temp_heic_converted = output_file + ".heic_decoded.png"
+                        im.save(temp_heic_converted, "PNG")
+                        source_image_path = temp_heic_converted
+                except Exception as e:
+                    if log_callback:
+                        log_callback(f"⚠️【HEIC 解碼警訊】{item.file_name} 轉碼失敗，嘗試直接傳入 FFmpeg: {e}")
+
+            # 模式一：純黑邊留白（零 SSD 磁碟 I/O 直通渲染 ＋ 四階段智慧自癒修復體系）
+            if self.config.fill_mode == "black":
+                cur_vcodec = active_codec or self._active_fallback_codec or self.config.vcodec
+                is_8k = self.config.width >= 7000
+                cpu_fallback_codec = "libx265"
+                cpu_br = "160M" if is_8k else "80M"
+                cpu_mr = "180M" if is_8k else "100M"
+                cpu_buf = "320M" if is_8k else "160M"
+
+                # 建立同畫質智慧多層級自癒嘗試方案：
+                plans = [
+                    ("首選編碼器直通", cur_vcodec, self.config.bitrate, self.config.maxrate, self.config.bufsize, 0.0),
+                    ("自適應顯存調節 (防顯存擠壓)", cur_vcodec, self.config.bitrate, "120M", "100M", 0.2),
+                ]
+
+                if "av1" in cur_vcodec:
+                    fallback_hw = "hevc_qsv" if "qsv" in cur_vcodec else "hevc_nvenc"
+                    plans.append((f"切換至成熟硬體加速 ({fallback_hw})", fallback_hw, self.config.bitrate, "120M", "100M", 0.1))
+
+                # 終極同畫質保底修復：【同解析度 CPU 軟體無損修復 (libx265)】
+                plans.append((
+                    f"{'8K' if is_8k else '4K'} 同畫質 CPU 軟體無損保底修復 ({cpu_fallback_codec})",
+                    cpu_fallback_codec, cpu_br, cpu_mr, cpu_buf, 0.0
+                ))
+
+                last_error_detail = "未知錯誤"
+                for plan_idx, (plan_name, codec, br, mr, buf, delay) in enumerate(plans):
+                    if self._is_cancelled:
+                        return False
+
+                    if delay > 0:
+                        time.sleep(delay)
+
+                    cmd_encode = self._build_image_encode_cmd(
+                        item, output_file, duration, codec, br, mr, buf, img_path_override=source_image_path
+                    )
+                    ret_code, stdout, stderr = self._run_command_cancellable(
+                        cmd_encode, startupinfo=startupinfo
+                    )
+                    if self._is_cancelled:
+                        return False
+
+                    if ret_code == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 1000:
+                        if plan_idx > 0:
+                            if "CPU" in plan_name or codec == "libx265":
+                                self._active_fallback_codec = "libx265"
+                            if log_callback:
+                                log_callback(
+                                    f"✓【自動修復成功】相片『{item.file_name}』已透過【{plan_name}】成功收錄！"
+                                )
+                        return True
+
+                    err_lines = [
+                        line.strip()
+                        for line in stderr.split("\n")
+                        if line.strip() and ("error" in line.lower() or "unsupported" in line.lower() or "allocat" in line.lower() or "failed" in line.lower())
+                    ]
+                    last_error_detail = err_lines[0] if err_lines else (stderr.strip().split("\n")[-1] if stderr else "執行失敗")
+
+                    if plan_idx < len(plans) - 1 and log_callback:
+                        next_plan_name = plans[plan_idx + 1][0]
+                        log_callback(
+                            f"⚠️【自動修復中】相片『{item.file_name}』遇到編碼異常（{last_error_detail}），"
+                            f"系統正在自動切換至【{next_plan_name}】重試修復..."
+                        )
+
+                if log_callback:
+                    log_callback(f"【嚴重錯誤】相片『{item.file_name}』所有修復方案均失敗 -> 原因：{last_error_detail}")
+                return False
+
+            # 模式二：毛玻璃高斯模糊背景（兩階段預渲染架構）
+            filter_complex = (
+                f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase:flags=bicubic,"
+                f"crop={w}:{h},boxblur=40:5[bg];"
+                f"[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[v]"
+            )
+
+            canvas_file = output_file + ".canvas.png"
+
             # 階段一：只渲染 1 幀靜態高畫質畫布（僅需 0.2~0.5 秒）
             cmd_canvas = [
                 self.ffmpeg_path,
                 "-y",
-                "-i", item.file_path,
+                "-i", source_image_path,
                 "-filter_complex", filter_complex,
                 "-map", "[v]",
                 "-frames:v", "1",
@@ -930,7 +974,7 @@ class VideoRenderEngine:
                         for line in c_err.split("\n")
                         if line.strip() and ("error" in line.lower() or "unsupported" in line.lower())
                     ]
-                    detail = err_lines[0] if err_lines else c_err.strip().split("\n")[-1]
+                    detail = err_lines[0] if err_lines else c_err.strip().split("\n")
                     log_callback(f"【畫布預渲染失敗】{item.file_name} -> 原因：{detail}")
                 return False
 
@@ -1032,10 +1076,16 @@ class VideoRenderEngine:
             if log_callback:
                 log_callback(f"【嚴重錯誤】相片『{item.file_name}』所有修復方案均失敗 -> 原因：{last_error_detail}")
             return False
+
         finally:
-            if os.path.exists(canvas_file):
+            if canvas_file and os.path.exists(canvas_file):
                 try:
                     os.remove(canvas_file)
+                except Exception:
+                    pass
+            if temp_heic_converted and os.path.exists(temp_heic_converted):
+                try:
+                    os.remove(temp_heic_converted)
                 except Exception:
                     pass
 

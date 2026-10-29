@@ -1,3 +1,9 @@
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
 """
 媒體檔案掃描與 EXIF 時間排序模組
 支援目錄樹狀結構解析、以任意起點彙整媒體、時間嚴格排序

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QSizePolicy,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -194,15 +195,16 @@ class MainWindow(QMainWindow):
 
         self.splitter.addWidget(self.left_widget)
 
-        # 右側面板：平滑滾動區域
+        # 右側面板：平滑滾動區域 (自適應彈性滾動，防止小螢幕擠壓)
         self.right_scroll = QScrollArea(self.splitter)
         self.right_scroll.setWidgetResizable(True)
         self.right_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         self.right_widget = QWidget(self.right_scroll)
+        self.right_widget.setMinimumWidth(460)
         right_layout = QVBoxLayout(self.right_widget)
-        right_layout.setContentsMargins(6, 0, 10, 0)
+        right_layout.setContentsMargins(8, 0, 12, 0)
         right_layout.setSpacing(10)
 
         # ⚡ 硬體加速支援儀表板群組
@@ -242,47 +244,59 @@ class MainWindow(QMainWindow):
         # 輸出畫質規格群組
         group_specs = QGroupBox("🚀 輸出畫質與規格設定（YouTube 最高箱子概念 · 8K優先）", self.right_widget)
         specs_layout = QVBoxLayout(group_specs)
-        specs_layout.setSpacing(8)
+        specs_layout.setSpacing(10)
 
-        # 🌟 快速選擇 K 數優先選擇列（首選 8K / 4K 一鍵切換）
-        row_k = QHBoxLayout()
-        lbl_k = QLabel("目標畫質等級（K 數優先）：", group_specs)
-        lbl_k.setStyleSheet("font-weight: bold; color: #00d2ff;")
-        self.btn_preset_8k = QPushButton("🌟 8K 超高畫質（首選推薦 · 7680x4320）", group_specs)
+        # 🌟 快速選擇 K 數優先選擇區 (上下分行，杜絕左右橫向過寬擠壓)
+        lbl_k = QLabel("🎯 目標畫質等級（K 數優先）：", group_specs)
+        lbl_k.setStyleSheet("font-weight: bold; color: #00d2ff; font-size: 13px;")
+        specs_layout.addWidget(lbl_k)
+
+        row_k_btns = QHBoxLayout()
+        row_k_btns.setSpacing(8)
+        self.btn_preset_8k = QPushButton("🌟 8K 超高畫質 (7680x4320 首選)", group_specs)
         self.btn_preset_8k.setCheckable(True)
         self.btn_preset_8k.setChecked(True)
+        self.btn_preset_8k.setMinimumHeight(36)
         self.btn_preset_8k.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_preset_8k.setStyleSheet("""
             QPushButton {
-                background-color: #2b2b36; border: 1px solid #4a4a5a; border-radius: 6px; color: #ffffff; padding: 6px 12px; font-weight: bold;
+                background-color: #2b2b36; border: 1px solid #4a4a5a; border-radius: 6px; color: #ffffff; padding: 6px 10px; font-weight: bold; font-size: 13px;
+            }
+            QPushButton:hover {
+                border-color: #00d2ff; background-color: #353545;
             }
             QPushButton:checked {
-                background-color: #0078d4; border: 1px solid #00f2fe; color: #ffffff;
+                background-color: #0078d4; border: 2px solid #00f2fe; color: #ffffff;
             }
         """)
-        self.btn_preset_4k = QPushButton("⚡ 4K 高畫質（極速狂飆 · 3840x2160）", group_specs)
+
+        self.btn_preset_4k = QPushButton("⚡ 4K 高畫質 (3840x2160 極速)", group_specs)
         self.btn_preset_4k.setCheckable(True)
+        self.btn_preset_4k.setMinimumHeight(36)
         self.btn_preset_4k.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_preset_4k.setStyleSheet("""
             QPushButton {
-                background-color: #2b2b36; border: 1px solid #4a4a5a; border-radius: 6px; color: #ffffff; padding: 6px 12px; font-weight: bold;
+                background-color: #2b2b36; border: 1px solid #4a4a5a; border-radius: 6px; color: #ffffff; padding: 6px 10px; font-weight: bold; font-size: 13px;
+            }
+            QPushButton:hover {
+                border-color: #00d2ff; background-color: #353545;
             }
             QPushButton:checked {
-                background-color: #0078d4; border: 1px solid #00f2fe; color: #ffffff;
+                background-color: #0078d4; border: 2px solid #00f2fe; color: #ffffff;
             }
         """)
+
         self.btn_preset_8k.clicked.connect(self._on_select_8k_preset)
         self.btn_preset_4k.clicked.connect(self._on_select_4k_preset)
-        row_k.addWidget(lbl_k)
-        row_k.addWidget(self.btn_preset_8k)
-        row_k.addWidget(self.btn_preset_4k)
-        specs_layout.addLayout(row_k)
+        row_k_btns.addWidget(self.btn_preset_8k, stretch=1)
+        row_k_btns.addWidget(self.btn_preset_4k, stretch=1)
+        specs_layout.addLayout(row_k_btns)
 
-        lbl_prof = QLabel("詳細編碼核心設定檔（支援自動平滑降級，遇限制不中斷）：", group_specs)
+        lbl_prof = QLabel("⚙️ 詳細編碼核心設定檔（支援自動平滑降級，遇限制不中斷）：", group_specs)
+        lbl_prof.setStyleSheet("color: #dcdce0; font-size: 12px; margin-top: 2px;")
         self.combo_profile = QComboBox(group_specs)
-        self.combo_profile.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.combo_profile.setMinimumContentsLength(20)
-        self.combo_profile.view().setMinimumWidth(580)
+        self.combo_profile.setMinimumHeight(36)
+        self.combo_profile.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo_profile.setMaxVisibleItems(10)
 
         for idx, prof in enumerate(self.profiles):
@@ -315,12 +329,16 @@ class MainWindow(QMainWindow):
         row_fill.addWidget(self.combo_fill)
         specs_layout.addLayout(row_fill)
 
-        # ⚡ 多工平行處理加速設定
+        # ⚡ 多工平行處理加速設定 (垂直或簡潔分行，杜絕擠壓)
         cpu_count = os.cpu_count() or 4
-        row_concur = QHBoxLayout()
         lbl_concur = QLabel(f"⚡ 平行處理加速（CPU {cpu_count} 核心 / 實體 RAM {self.total_ram_gb}GB）：", group_specs)
+        lbl_concur.setStyleSheet("color: #dcdce0; font-size: 12px; margin-top: 2px;")
+        specs_layout.addWidget(lbl_concur)
+
         self.combo_concurrency = QComboBox(group_specs)
-        self.combo_concurrency.addItem("🛡️ 智慧記憶體防護推薦（自動調節，零 SSD SWAP，保護硬碟壽命）", -1)
+        self.combo_concurrency.setMinimumHeight(32)
+        self.combo_concurrency.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.combo_concurrency.addItem("🛡️ 智慧記憶體防護推薦（自動調節，零 SWAP，保護 SSD）", -1)
         self.combo_concurrency.addItem("4 緒 (8K 極安全模式，RAM 佔用約 7GB，保護 SSD 零換頁)", 4)
         self.combo_concurrency.addItem("6 緒 (8K 均衡極速，RAM 佔用約 11GB，32G 筆電推薦)", 6)
         self.combo_concurrency.addItem("8 緒 (4K/8K 雙引擎推薦，RAM 佔用約 14GB)", 8)
@@ -334,9 +352,7 @@ class MainWindow(QMainWindow):
         self.combo_concurrency.addItem("1 緒 (單工除錯模式)", 1)
         self.combo_concurrency.currentIndexChanged.connect(self._update_stats_estimate)
 
-        row_concur.addWidget(lbl_concur)
-        row_concur.addWidget(self.combo_concurrency)
-        specs_layout.addLayout(row_concur)
+        specs_layout.addWidget(self.combo_concurrency)
 
         # 💾 記憶體與 SSD 安全評估狀態顯示
         self.lbl_memory_safeguard = QLabel("💾 記憶體與 SSD 安全評估：計算中...", group_specs)
@@ -419,7 +435,7 @@ class MainWindow(QMainWindow):
 
         self.right_scroll.setWidget(self.right_widget)
         self.splitter.addWidget(self.right_scroll)
-        self.splitter.setSizes([460, 740])
+        self.splitter.setSizes([380, 820])
         layout.addWidget(self.splitter, stretch=1)
 
         # 底部按鈕操作列
@@ -1142,7 +1158,9 @@ class MainWindow(QMainWindow):
         self.lbl_stat_target.setText(f"起點目標：【{node.name}】（包含其所有子資料夾）")
         self.lbl_stat_counts.setText(f"包含媒體：相片 {img_count} 張 / 影片 {vid_count} 支 (共 {img_count + vid_count} 個項目)")
         self.lbl_stat_est_duration.setText(f"預估總時長：約 {duration_str}")
-        self.lbl_stat_est_size.setText(f"預估總容量：約 {est_gb:.2f} GB (以最高位元率 {bitrate_str} 估算)")
+        self.lbl_stat_est_size.setText(
+            f"預估總容量上限：約 {est_gb:.2f} GB (理論最高上限 · 靜態照片無運動變化，經無損壓縮後實際約 50%~60% 容量，畫質視覺無損)"
+        )
 
         if is_auto_split and estimated_parts > 1:
             self.lbl_stat_split_info.setText(
