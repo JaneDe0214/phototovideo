@@ -1218,9 +1218,12 @@ class VideoRenderEngine:
             elif "libx265" in codec or "libx264" in codec:
                 preset_args = ["-preset", "faster"]
 
+            hwaccel_args = ["-hwaccel", "auto"] if ("qsv" in codec or "nvenc" in codec or "amf" in codec) else []
+
             cmd = [
                 self.ffmpeg_path,
                 "-y",
+                *hwaccel_args,
                 "-i", item.file_path,
                 "-filter_complex", filter_complex,
                 "-map", "[v]",
@@ -1232,7 +1235,7 @@ class VideoRenderEngine:
                 "-bufsize", buf,
                 "-r", str(fps),
                 "-g", str(fps),
-                "-pix_fmt", "yuv420p",
+                "-pix_fmt", "nv12" if "qsv" in codec else "yuv420p",
                 "-c:a", "aac",
                 "-b:a", self.config.audio_bitrate,
                 "-ar", str(self.config.audio_samplerate),
