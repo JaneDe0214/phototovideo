@@ -49,6 +49,7 @@ class RenderConfig:
         max_duration_seconds: float = 42000.0,  # 11 小時 40 分 (YT 12h 安全線)
         max_size_gb: float = 240.0,             # 240 GB (YT 256GB 安全線)
         concurrency: int = 4,              # 多工平行執行緒數 (充分榨乾 CPU 與雙 MFX 引擎)
+        pix_fmt: str = "p010le",            # 預設最高規格 10-bit P010 (10.7億色極致無色帶)
     ):
         self.resolution = resolution
         self.width, self.height = map(int, resolution.split("x"))
@@ -66,6 +67,7 @@ class RenderConfig:
         self.max_duration_seconds = max_duration_seconds
         self.max_size_gb = max_size_gb
         self.concurrency = max(1, concurrency)
+        self.pix_fmt = pix_fmt
 
 
 class VideoRenderEngine:
@@ -547,10 +549,21 @@ class VideoRenderEngine:
         effective_bufsize = self.config.bufsize
 
         if ("qsv" in effective_vcodec or "nvenc" in effective_vcodec or "amf" in effective_vcodec):
-            test_pix_fmt = "nv12" if "qsv" in effective_vcodec else "yuv420p"
+            is_10bit = getattr(self.config, "pix_fmt", "p010le") in ("p010le", "p010", "yuv420p10le")
+            test_pix_fmt = "p010le" if is_10bit else ("nv12" if "qsv" in effective_vcodec else "yuv420p")
             hw_ok, hw_msg = self._test_hardware_encode_capability(
                 effective_vcodec, self.config.width, self.config.height, test_pix_fmt
             )
+            # 若 10-bit P010 遇到極端舊顯卡不支援，退而嘗試 8-bit NV12
+            if not hw_ok and is_10bit:
+                hw_ok_nv12, hw_msg_nv12 = self._test_hardware_encode_capability(
+                    effective_vcodec, self.config.width, self.config.height, "nv12"
+                )
+                if hw_ok_nv12:
+                    hw_ok = True
+                    test_pix_fmt = "nv12"
+                    self.config.pix_fmt = "nv12"
+
             if not hw_ok:
                 # 第一級智慧硬體降級：若 AV1 硬體編碼受限，優先切換至成熟的 HEVC 硬體加速（同為 GPU 極速運算）！
                 fallback_hw = None
@@ -829,7 +842,15 @@ class VideoRenderEngine:
         """組裝黑邊模式下單幀降頻縮放之 FFmpeg 直通管線指令"""
         w, h = self.config.width, self.config.height
         fps = self.config.fps
-        pix_fmt = "nv12" if "qsv" in vcodec else "yuv420p"
+        # 旗艦 10-bit P010 (10.7億色) vs 8-bit NV12 自動精準適配
+        is_10bit = getattr(self.config, "pix_fmt", "p010le") in ("p010le", "p010", "yuv420p10le")
+        profile_args = []
+        if is_10bit:
+            pix_fmt = "yuv420p10le" if "libx265" in vcodec else "p010le"
+            if "hevc" in vcodec or "265" in vcodec:
+                profile_args = ["-profile:v", "main10"]
+        else:
+            pix_fmt = "nv12" if "qsv" in vcodec else "yuv420p"
 
         preset_args = []
         quality_args = []
@@ -877,6 +898,7 @@ class VideoRenderEngine:
             *preset_args,
             *quality_args,
             *color_args,
+            *profile_args,
             "-c:v", vcodec,
             "-b:v", bitrate,
             "-maxrate", maxrate,
@@ -1079,7 +1101,14 @@ class VideoRenderEngine:
                 elif "libx265" in codec or "libx264" in codec:
                     preset_args = ["-preset", "faster"]
 
-                cur_pix_fmt = "nv12" if "qsv" in codec else "yuv420p"
+                is_10bit = getattr(self.config, "pix_fmt", "p010le") in ("p010le", "p010", "yuv420p10le")
+                profile_args = []
+                if is_10bit:
+                    cur_pix_fmt = "yuv420p10le" if "libx265" in codec else "p010le"
+                    if "hevc" in codec or "265" in codec:
+                        profile_args = ["-profile:v", "main10"]
+                else:
+                    cur_pix_fmt = "nv12" if "qsv" in codec else "yuv420p"
 
                 cmd_encode = [
                     self.ffmpeg_path,
@@ -1092,6 +1121,7 @@ class VideoRenderEngine:
                     "-t", str(duration),
                     "-i", f"anullsrc=r={self.config.audio_samplerate}:cl=stereo",
                     *preset_args,
+                    *profile_args,
                     "-c:v", codec,
                     "-b:v", br,
                     "-maxrate", mr,
@@ -1219,6 +1249,14 @@ class VideoRenderEngine:
                 preset_args = ["-preset", "faster"]
 
             hwaccel_args = ["-hwaccel", "auto"] if ("qsv" in codec or "nvenc" in codec or "amf" in codec) else []
+            is_10bit = getattr(self.config, "pix_fmt", "p010le") in ("p010le", "p010", "yuv420p10le")
+            profile_args = []
+            if is_10bit:
+                cur_pix_fmt = "yuv420p10le" if "libx265" in codec else "p010le"
+                if "hevc" in codec or "265" in codec:
+                    profile_args = ["-profile:v", "main10"]
+            else:
+                cur_pix_fmt = "nv12" if "qsv" in codec else "yuv420p"
 
             cmd = [
                 self.ffmpeg_path,
@@ -1229,13 +1267,14 @@ class VideoRenderEngine:
                 "-map", "[v]",
                 "-map", "0:a?",
                 *preset_args,
+                *profile_args,
                 "-c:v", codec,
                 "-b:v", br,
                 "-maxrate", mr,
                 "-bufsize", buf,
                 "-r", str(fps),
                 "-g", str(fps),
-                "-pix_fmt", "nv12" if "qsv" in codec else "yuv420p",
+                "-pix_fmt", cur_pix_fmt,
                 "-c:a", "aac",
                 "-b:a", self.config.audio_bitrate,
                 "-ar", str(self.config.audio_samplerate),

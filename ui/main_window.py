@@ -631,6 +631,7 @@ class MainWindow(QMainWindow):
             "max_duration_seconds": float(self.combo_max_dur.currentData()),
             "max_size_gb": float(self.combo_max_size.currentData()),
             "concurrency": effective_concur,
+            "pix_fmt": prof.get("pix_fmt", "p010le"),
         }
 
         task = BatchTask(
@@ -892,6 +893,7 @@ class MainWindow(QMainWindow):
             max_duration_seconds=cfg_d.get("max_duration_seconds", 42000.0),
             max_size_gb=cfg_d.get("max_size_gb", 240.0),
             concurrency=cfg_d.get("concurrency", 4),
+            pix_fmt=cfg_d.get("pix_fmt", "p010le"),
         )
 
         engine = VideoRenderEngine(config)
@@ -1296,6 +1298,7 @@ class MainWindow(QMainWindow):
             max_duration_seconds=float(self.combo_max_dur.currentData()),
             max_size_gb=float(self.combo_max_size.currentData()),
             concurrency=effective_concur,
+            pix_fmt=prof.get("pix_fmt", "p010le"),
         )
 
         self.last_output_dir = out_dir
