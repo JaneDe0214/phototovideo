@@ -56,6 +56,7 @@ from core.ffmpeg_engine import (
 )
 from core.scanner import AlbumScanner, DirectoryTreeNode
 from core.queue_manager import QueueManager, BatchTask
+from core.logger import logger
 
 
 class RenderWorker(QThread):
@@ -87,17 +88,26 @@ class RenderWorker(QThread):
         def on_log(msg):
             self.log_signal.emit(msg)
 
-        success = self.engine.render_album_to_video(
-            self.media_list,
-            self.output_video_path,
-            self.output_chapter_path,
-            self.target_title,
-            progress_callback=on_progress,
-            log_callback=on_log,
-        )
-
-        msg = self.output_video_path if success else "渲染過程中斷或失敗"
-        self.finished_signal.emit(success, msg)
+        try:
+            success = self.engine.render_album_to_video(
+                self.media_list,
+                self.output_video_path,
+                self.output_chapter_path,
+                self.target_title,
+                progress_callback=on_progress,
+                log_callback=on_log,
+            )
+            msg = self.output_video_path if success else "渲染過程中斷或失敗"
+            self.finished_signal.emit(success, msg)
+        except Exception as e:
+            import sys
+            from core.logger import log_crash, logger
+            exc_type, exc_val, exc_tb = sys.exc_info()
+            crash_file, _ = log_crash(exc_type, exc_val, exc_tb, thread_name="RenderWorker")
+            err_msg = f"【致命渲染異常】算圖執行緒遭遇未捕捉錯誤：{str(e)}（已記錄至 {crash_file}）"
+            self.log_signal.emit(err_msg)
+            logger.error(err_msg, exc_info=True)
+            self.finished_signal.emit(False, err_msg)
 
     def stop(self):
         self.engine.cancel()
@@ -436,6 +446,7 @@ class MainWindow(QMainWindow):
         self.txt_log = QTextEdit(group_log)
         self.txt_log.setReadOnly(True)
         self.txt_log.setMinimumHeight(140)
+        self.txt_log.document().setMaximumBlockCount(2000)
         log_layout.addWidget(self.txt_log)
         right_layout.addWidget(group_log)
 
@@ -476,10 +487,17 @@ class MainWindow(QMainWindow):
         self.btn_open_folder.setEnabled(False)
         self.btn_open_folder.clicked.connect(self._on_open_folder)
 
+        # 救援按鈕：將中斷的 .cache_* 快取片段立即救回無損合成為影片
+        self.btn_rescue_cache = QPushButton("🛠️ 救援快取影片")
+        self.btn_rescue_cache.setStyleSheet("background-color: #553311; border: 1px solid #ffaa33; color: #ffdd99; font-weight: bold;")
+        self.btn_rescue_cache.setToolTip("掃描並立即將中斷之 .cache_* 快取片段無損封裝為完整影片，拯救已算好的進度！")
+        self.btn_rescue_cache.clicked.connect(self._on_rescue_cache_clicked)
+
         btn_box.addWidget(self.btn_add_to_queue, stretch=2)
         btn_box.addWidget(self.btn_start, stretch=2)
         btn_box.addWidget(self.btn_cancel, stretch=1)
         btn_box.addWidget(self.btn_open_folder, stretch=1)
+        btn_box.addWidget(self.btn_rescue_cache, stretch=1)
         bottom_box.addLayout(btn_box)
 
         layout.addLayout(bottom_box)
@@ -520,6 +538,11 @@ class MainWindow(QMainWindow):
         self.btn_queue_clean_cache = QPushButton("🗄 一鍵清理暫存快取")
         self.btn_queue_clean_cache.clicked.connect(self._on_clean_disk_cache)
 
+        self.btn_queue_rescue = QPushButton("🛠️ 救援快取影片")
+        self.btn_queue_rescue.setStyleSheet("background-color: #553311; border: 1px solid #ffaa33; color: #ffdd99; font-weight: bold;")
+        self.btn_queue_rescue.setToolTip("掃描並立即將中斷之 .cache_* 快取片段無損封裝為完整影片！")
+        self.btn_queue_rescue.clicked.connect(self._on_rescue_cache_clicked)
+
         top_bar.addWidget(self.btn_queue_start)
         top_bar.addWidget(self.btn_queue_pause)
         top_bar.addWidget(self.btn_queue_stop)
@@ -530,6 +553,7 @@ class MainWindow(QMainWindow):
         top_bar.addSpacing(10)
         top_bar.addWidget(self.btn_queue_clear_done)
         top_bar.addWidget(self.btn_queue_clean_cache)
+        top_bar.addWidget(self.btn_queue_rescue)
         top_bar.addStretch()
 
         layout.addLayout(top_bar)
@@ -581,6 +605,7 @@ class MainWindow(QMainWindow):
         self.txt_queue_log = QTextEdit()
         self.txt_queue_log.setReadOnly(True)
         self.txt_queue_log.setMaximumHeight(140)
+        self.txt_queue_log.document().setMaximumBlockCount(2000)
         bottom_layout.addWidget(self.txt_queue_log)
 
         layout.addWidget(bottom_frame)
@@ -810,6 +835,69 @@ class MainWindow(QMainWindow):
             f"已釋放出約 {size_str} 的硬碟空間！"
         )
         self.txt_queue_log.append(f"🧹【清理完成】已在 {out_dir} 清理 {count} 個快取目錄，釋放 {size_str} 空間。")
+
+    def _on_rescue_cache_clicked(self):
+        """一鍵快取救援：將上次因意外中斷遺留之 .cache_* 片段無損封裝為成果影片"""
+        suggested_dir = self._get_effective_output_dir() or ""
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "選擇包含 .cache_* 或直接選取該 .cache_* 快取資料夾",
+            suggested_dir if os.path.exists(suggested_dir) else "",
+        )
+        if not folder:
+            return
+
+        folder = os.path.normpath(folder)
+        target_cache_dir = None
+
+        if os.path.basename(folder).startswith(".cache_"):
+            target_cache_dir = folder
+        else:
+            candidates = [
+                os.path.join(folder, d)
+                for d in os.listdir(folder)
+                if os.path.isdir(os.path.join(folder, d)) and d.startswith(".cache_")
+            ]
+            if not candidates:
+                QMessageBox.information(
+                    self,
+                    "未發現快取目錄",
+                    f"在所選資料夾中未發現任何以 .cache_ 開頭的暫存快取資料夾：\n{folder}\n\n"
+                    f"若您先前有進行轉檔，請確認是否選取了正確的輸出磁碟目錄。",
+                )
+                return
+            elif len(candidates) == 1:
+                target_cache_dir = candidates[0]
+            else:
+                candidates.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+                target_cache_dir = candidates[0]
+                self._log(f"💡 發現多個快取資料夾，已自動選取最新修改者：{os.path.basename(target_cache_dir)}")
+
+        engine = VideoRenderEngine()
+        self._log(f"🛠️【快取救援啟動】正在掃描快取目錄：{target_cache_dir} ...")
+        self.txt_queue_log.append(f"🛠️【快取救援啟動】正在掃描快取目錄：{target_cache_dir} ...")
+
+        ok, res_path, count = engine.rescue_cache_to_video(
+            target_cache_dir,
+            log_callback=lambda m: (self._log(m), self.txt_queue_log.append(m))
+        )
+
+        if ok:
+            QMessageBox.information(
+                self,
+                "🎉 快取救援成功",
+                f"太棒了！已成功將先前算好的 {count} 個媒體片段無損封裝為完整影片！\n\n"
+                f"輸出檔案位置：\n{res_path}\n\n"
+                f"這部影片可正常播放與上傳，昨晚的所有進度均已成功救回！",
+            )
+            self.last_output_dir = os.path.dirname(res_path)
+            self.btn_open_folder.setEnabled(True)
+        else:
+            QMessageBox.warning(
+                self,
+                "救援未完成",
+                f"快取救援失敗或未發現有效片段：\n{res_path}",
+            )
 
     # ================= 批次佇列驅動引擎 =================
 
@@ -1042,6 +1130,7 @@ class MainWindow(QMainWindow):
 
     def _log(self, text: str):
         self.txt_log.append(text)
+        logger.info(text)
 
     def _on_select_root_dir(self):
         folder = QFileDialog.getExistingDirectory(self, "選擇旅遊或相簿根目錄")
@@ -1090,6 +1179,20 @@ class MainWindow(QMainWindow):
         self.btn_start.setEnabled(True)
         self.btn_add_to_queue.setEnabled(True)
         self._update_stats_estimate()
+
+        # 檢查該相簿目錄或輸出目錄下是否有上次中斷遺留的快取
+        eff_dir = self._get_effective_output_dir()
+        if eff_dir and os.path.exists(eff_dir):
+            try:
+                caches = [d for d in os.listdir(eff_dir) if os.path.isdir(os.path.join(eff_dir, d)) and d.startswith(".cache_")]
+                if caches:
+                    self._log(
+                        f"💡【發現未完成快取】偵測到目錄中存在 {len(caches)} 個上次中斷遺留之快取資料夾！\n"
+                        f"   👉 您可以隨時點選右下方【🛠️ 救援快取影片】立即將已完成的片段無損合成為成果影片；\n"
+                        f"   👉 或直接點選【開始製作】，系統將以 100% 斷點續傳自動接續剩餘項目！"
+                    )
+            except Exception:
+                pass
 
     def _on_select_8k_preset(self):
         """一鍵選定 8K 超高畫質首選設定檔"""

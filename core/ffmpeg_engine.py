@@ -13,6 +13,7 @@ GOP 關鍵影格強制插入（確保截圖零失真）、分段快取與無損 
 """
 
 import concurrent.futures
+from datetime import datetime
 import os
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 from core.chapter_generator import ChapterGenerator
 from core.encoder_detector import find_ffmpeg
+from core.logger import logger
 from core.scanner import MediaItem
 
 # 靜態相片與動態影片的位元率加權比率常數（精準容量模型）
@@ -73,8 +75,8 @@ class RenderConfig:
 class VideoRenderEngine:
     """影片渲染引擎"""
 
-    def __init__(self, config: RenderConfig, ffmpeg_path: Optional[str] = None):
-        self.config = config
+    def __init__(self, config: Optional[RenderConfig] = None, ffmpeg_path: Optional[str] = None):
+        self.config = config or RenderConfig()
         self.ffmpeg_path, self.ffprobe_path = find_ffmpeg()
         if ffmpeg_path:
             self.ffmpeg_path = ffmpeg_path
@@ -713,43 +715,73 @@ class VideoRenderEngine:
                         log_callback(f"【渲染程序異常】{item.file_name} -> {str(ex)}")
                     return False, idx
 
-            # 2. 僅對未完成的項目進行多執行緒平行算圖
+            # 2. 僅對未完成的項目進行受控多執行緒平行算圖（受控視窗防止記憶體暴增）
             if pending_tasks:
+                concurrency = max(1, self.config.concurrency)
+                max_in_flight = concurrency * 4
                 if log_callback:
                     log_callback(
-                        f"[平行加速] 啟動多工平行渲染引擎：同時啟用 {self.config.concurrency} 個執行緒加速處理剩餘項目..."
+                        f"[平行加速] 啟動多工平行渲染引擎：同時啟用 {concurrency} 個執行緒加速處理剩餘項目（受控視窗上限 {max_in_flight}）..."
                     )
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=self.config.concurrency)
+
+                task_iter = iter(pending_tasks)
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+                running_futures: Dict[concurrent.futures.Future, tuple] = {}
                 try:
-                    future_to_task = {executor.submit(_worker_task, t): t for t in pending_tasks}
-                    for future in concurrent.futures.as_completed(future_to_task):
-                        if self._is_cancelled:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            return False
-
+                    # 預先填滿受控並行視窗
+                    for _ in range(min(max_in_flight, len(pending_tasks))):
                         try:
-                            ok, idx = future.result()
-                        except Exception:
-                            ok = False
+                            t = next(task_iter)
+                            fut = executor.submit(_worker_task, t)
+                            running_futures[fut] = t
+                        except StopIteration:
+                            break
 
+                    while running_futures:
                         if self._is_cancelled:
                             executor.shutdown(wait=False, cancel_futures=True)
                             return False
 
-                        with lock:
-                            completed_count += 1
-                            elapsed = time.time() - start_time
-                            speed = (completed_count - cached_count) / max(elapsed, 0.1)
-                            remain_items = total_items - completed_count
-                            eta_sec = int(remain_items / max(speed, 0.01))
-                            eta_str = f"{eta_sec // 60}分{eta_sec % 60}秒" if eta_sec >= 60 else f"{eta_sec}秒"
+                        done, _ = concurrent.futures.wait(
+                            running_futures.keys(),
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
 
-                            if progress_callback:
-                                progress_callback(
-                                    completed_count,
-                                    total_items,
-                                    f"{part_prefix}平行加速中 ({completed_count}/{total_items}) - 速度: {speed:.1f} 項/秒 (預估剩餘: {eta_str})",
-                                )
+                        for future in done:
+                            t = running_futures.pop(future)
+                            try:
+                                ok, idx = future.result()
+                            except Exception as ex:
+                                ok = False
+                                if log_callback:
+                                    log_callback(f"【執行緒異常】項目處理例外: {ex}")
+
+                            if self._is_cancelled:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return False
+
+                            with lock:
+                                completed_count += 1
+                                elapsed = time.time() - start_time
+                                speed = (completed_count - cached_count) / max(elapsed, 0.1)
+                                remain_items = total_items - completed_count
+                                eta_sec = int(remain_items / max(speed, 0.01))
+                                eta_str = f"{eta_sec // 60}分{eta_sec % 60}秒" if eta_sec >= 60 else f"{eta_sec}秒"
+
+                                if progress_callback:
+                                    progress_callback(
+                                        completed_count,
+                                        total_items,
+                                        f"{part_prefix}平行加速中 ({completed_count}/{total_items}) - 速度: {speed:.1f} 項/秒 (預估剩餘: {eta_str})",
+                                    )
+
+                            # 動態補入新任務至視窗中，維持常駐 Future 數量恆定
+                            try:
+                                next_t = next(task_iter)
+                                new_fut = executor.submit(_worker_task, next_t)
+                                running_futures[new_fut] = next_t
+                            except StopIteration:
+                                pass
                 finally:
                     executor.shutdown(wait=False, cancel_futures=True)
 
@@ -820,6 +852,12 @@ class VideoRenderEngine:
                 log_callback(f"🧹【空間釋放】影片封裝完成，已自動清除暫存快取目錄，100% 釋出磁碟空間！")
             return True
 
+        except Exception as e:
+            if log_callback:
+                log_callback(f"【段落渲染遭遇異常】{str(e)}")
+            logger.error(f"Part {part_index} 渲染過程遭遇例外", exc_info=True)
+            return False
+
         finally:
             if is_render_success:
                 try:
@@ -834,6 +872,98 @@ class VideoRenderEngine:
                         f"   {temp_dir}\n"
                         f"   下次啟動同一任務將自動從斷點無縫接續！"
                     )
+
+    def rescue_cache_to_video(
+        self,
+        cache_dir: str,
+        output_video_path: Optional[str] = None,
+        log_callback: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[bool, str, int]:
+        """
+        【一鍵快取救援/合併工具】
+        直接掃描中斷或未完成之 .cache_* 快取目錄，自動按順序無損封裝為可用影片。
+        回傳：(是否成功, 輸出影片路徑或錯誤訊息, 合併之片段數量)
+        """
+        if not os.path.exists(cache_dir) or not os.path.isdir(cache_dir):
+            return False, f"指定之快取目錄不存在：{cache_dir}", 0
+
+        # 收集目錄內所有有效的 seg_*.mp4
+        seg_candidates = []
+        for fn in os.listdir(cache_dir):
+            if fn.startswith("seg_") and fn.endswith(".mp4"):
+                fp = os.path.join(cache_dir, fn)
+                if os.path.isfile(fp) and os.path.getsize(fp) > 1000:
+                    seg_candidates.append(fn)
+
+        if not seg_candidates:
+            return False, "快取目錄內未發現任何大於 1KB 的有效渲染片段 (seg_*.mp4)", 0
+
+        # 按序號升冪排序
+        seg_candidates.sort()
+        count = len(seg_candidates)
+
+        if log_callback:
+            log_callback(f"🔍【快取掃描】發現 {count} 個有效渲染片段，準備進行無損封裝救援...")
+
+        # 確定輸出影片路徑
+        if not output_video_path:
+            parent_dir = os.path.dirname(os.path.abspath(cache_dir))
+            cache_folder_name = os.path.basename(os.path.abspath(cache_dir))
+            clean_name = cache_folder_name.lstrip(".")
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_video_path = os.path.join(parent_dir, f"[救援成果]_{clean_name}_{timestamp_str}.mp4")
+
+        concat_list_file = os.path.join(cache_dir, "rescue_concat_list.txt")
+        try:
+            with open(concat_list_file, "w", encoding="utf-8") as f:
+                for fn in seg_candidates:
+                    fp = os.path.join(cache_dir, fn).replace("\\", "/")
+                    f.write(f"file '{fp}'\n")
+
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+            cmd = [
+                self.ffmpeg_path,
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_list_file,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                output_video_path,
+            ]
+
+            if log_callback:
+                log_callback(f"🎬 正在執行極速無損封裝至：{output_video_path} ...")
+
+            ret_code, stdout, stderr = self._run_command_cancellable(cmd, startupinfo=startupinfo)
+            if ret_code != 0 or not os.path.exists(output_video_path) or os.path.getsize(output_video_path) < 1000:
+                err_msg = f"FFmpeg 封裝失敗: {stderr.strip()[:200]}"
+                if log_callback:
+                    log_callback(f"❌【救援失敗】{err_msg}")
+                return False, err_msg, count
+
+            if log_callback:
+                size_mb = os.path.getsize(output_video_path) / (1024 * 1024)
+                log_callback(
+                    f"🎉【救援成功】已成功將 {count} 個片段無損合併為影片！\n"
+                    f"   輸出檔案：{output_video_path} ({size_mb:.1f} MB)\n"
+                    f"   💡 您可以正常播放或上傳此影片！"
+                )
+            return True, output_video_path, count
+        except Exception as e:
+            if log_callback:
+                log_callback(f"❌【救援異常】{str(e)}")
+            return False, str(e), count
+        finally:
+            if os.path.exists(concat_list_file):
+                try:
+                    os.remove(concat_list_file)
+                except Exception:
+                    pass
 
     @staticmethod
     def clean_cache_directories(directory: str) -> Tuple[int, float]:
@@ -981,6 +1111,7 @@ class VideoRenderEngine:
             if ext_lower in (".heic", ".heif"):
                 try:
                     from PIL import Image, ImageOps
+                    Image.MAX_IMAGE_PIXELS = None  # 防止超大空拍/全景相片拋出異常
                     with Image.open(item.file_path) as im:
                         im = ImageOps.exif_transpose(im)
                         if im.mode not in ("RGB", "RGBA"):
@@ -1029,7 +1160,7 @@ class VideoRenderEngine:
                         item, output_file, duration, codec, br, mr, buf, img_path_override=source_image_path
                     )
                     ret_code, stdout, stderr = self._run_command_cancellable(
-                        cmd_encode, startupinfo=startupinfo
+                        cmd_encode, startupinfo=startupinfo, timeout=120.0
                     )
                     if self._is_cancelled:
                         return False
@@ -1084,7 +1215,7 @@ class VideoRenderEngine:
                 canvas_file,
             ]
             c_ret, c_out, c_err = self._run_command_cancellable(
-                cmd_canvas, startupinfo=startupinfo
+                cmd_canvas, startupinfo=startupinfo, timeout=60.0
             )
             if self._is_cancelled:
                 return False
@@ -1174,7 +1305,7 @@ class VideoRenderEngine:
                 ]
 
                 e_ret, e_out, e_err = self._run_command_cancellable(
-                    cmd_encode, startupinfo=startupinfo
+                    cmd_encode, startupinfo=startupinfo, timeout=120.0
                 )
                 if self._is_cancelled:
                     return False
@@ -1327,7 +1458,7 @@ class VideoRenderEngine:
             ]
 
             v_ret, v_out, v_err = self._run_command_cancellable(
-                cmd, startupinfo=startupinfo
+                cmd, startupinfo=startupinfo, timeout=300.0
             )
             if self._is_cancelled:
                 return False

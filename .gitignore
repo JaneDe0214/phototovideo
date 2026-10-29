@@ -8,5 +8,7 @@ bin/ffmpeg.exe
 bin/ffprobe.exe
 build/
 dist/
+*.log
+crash_log.txt
 .vscode/
 .idea/

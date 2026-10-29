@@ -5,6 +5,10 @@
 import sys
 import os
 
+# 安裝全域崩潰保護與安全日誌系統（防止任何未捕獲例外造成靜默閃退）
+from core.logger import setup_crash_guard, logger
+setup_crash_guard()
+
 # 在無主控台（--noconsole）模式下防護 stdout / stderr 為 None 的情況
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -31,10 +35,14 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_THEME)
 
+    logger.info("正在建立主視窗介面...")
     window = MainWindow()
     window.show()
 
-    sys.exit(app.exec())
+    logger.info("主視窗已顯示，進入 Qt 事件循環")
+    ret_code = app.exec()
+    logger.info(f"應用程式正常結束，結束代碼: {ret_code}")
+    sys.exit(ret_code)
 
 
 if __name__ == "__main__":
