@@ -245,6 +245,42 @@ class VideoRenderEngine:
         except Exception:
             return 10.0
 
+    def _has_audio_stream(self, video_path: str) -> bool:
+        """透過 ffprobe 檢測影片是否含有音訊串流（含快取）"""
+        if not hasattr(self, "_video_audio_cache"):
+            self._video_audio_cache: Dict[str, bool] = {}
+        if video_path in self._video_audio_cache:
+            return self._video_audio_cache[video_path]
+        if not self.ffprobe_path or not os.path.exists(self.ffprobe_path):
+            return True
+        try:
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            cmd = [
+                self.ffprobe_path,
+                "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                video_path,
+            ]
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=startupinfo,
+                timeout=5,
+            )
+            has_a = len(res.stdout.strip()) > 0
+            self._video_audio_cache[video_path] = has_a
+            return has_a
+        except Exception:
+            return True
+
     def estimate_media_item_size_gb(self, item: MediaItem, dur: float, gb_per_sec: float) -> float:
         """依據相片或影片之實際編碼特性，精準計算單一媒體預估輸出容量 (GB)"""
         ratio = PHOTO_BITRATE_RATIO if item.is_image else VIDEO_BITRATE_RATIO
@@ -1258,14 +1294,23 @@ class VideoRenderEngine:
             else:
                 cur_pix_fmt = "nv12" if "qsv" in codec else "yuv420p"
 
+            has_audio = self._has_audio_stream(item.file_path)
+            if has_audio:
+                audio_input_args = []
+                audio_map_args = ["-map", "0:a:0"]
+            else:
+                audio_input_args = ["-f", "lavfi", "-i", f"anullsrc=r={self.config.audio_samplerate}:cl=stereo"]
+                audio_map_args = ["-map", "1:a", "-shortest"]
+
             cmd = [
                 self.ffmpeg_path,
                 "-y",
                 *hwaccel_args,
                 "-i", item.file_path,
+                *audio_input_args,
                 "-filter_complex", filter_complex,
                 "-map", "[v]",
-                "-map", "0:a?",
+                *audio_map_args,
                 *preset_args,
                 *profile_args,
                 "-c:v", codec,
