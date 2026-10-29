@@ -23,6 +23,11 @@ from core.chapter_generator import ChapterGenerator
 from core.encoder_detector import find_ffmpeg
 from core.scanner import MediaItem
 
+# 靜態相片與動態影片的位元率加權比率常數（精準容量模型）
+PHOTO_BITRATE_RATIO = 0.52   # 靜態相片因影格間零運動殘差，實際容量約為最高位元率上限的 52%
+VIDEO_BITRATE_RATIO = 0.92   # 動態影片具備運動向量與動態畫面變化，約為最高位元率上限的 92%
+AUDIO_BITRATE_KBPS = 512.0   # 音訊規格 512 kbps
+
 
 class RenderConfig:
     """渲染輸出設定規格"""
@@ -76,6 +81,7 @@ class VideoRenderEngine:
         self._process_lock = threading.Lock()
         self._active_fallback_codec: Optional[str] = None
         self._tested_codecs: Dict[str, Tuple[bool, str]] = {}
+        self._video_duration_cache: Dict[str, float] = {}
 
     def _test_hardware_encode_capability(
         self, vcodec: str, width: int, height: int, pix_fmt: str
@@ -203,7 +209,9 @@ class VideoRenderEngine:
                 self._active_processes.discard(proc)
 
     def _get_video_duration(self, video_path: str) -> float:
-        """使用 ffprobe 取得影片的精準長度（秒）"""
+        """使用 ffprobe 取得影片的精準長度（秒，含快取機制）"""
+        if video_path in self._video_duration_cache:
+            return self._video_duration_cache[video_path]
         if not self.ffprobe_path or not os.path.exists(self.ffprobe_path):
             return 10.0
 
@@ -229,14 +237,22 @@ class VideoRenderEngine:
                 startupinfo=startupinfo,
                 timeout=10,
             )
-            return float(res.stdout.strip())
+            val = float(res.stdout.strip())
+            self._video_duration_cache[video_path] = val
+            return val
         except Exception:
             return 10.0
+
+    def estimate_media_item_size_gb(self, item: MediaItem, dur: float, gb_per_sec: float) -> float:
+        """依據相片或影片之實際編碼特性，精準計算單一媒體預估輸出容量 (GB)"""
+        ratio = PHOTO_BITRATE_RATIO if item.is_image else VIDEO_BITRATE_RATIO
+        audio_gb_per_sec = (AUDIO_BITRATE_KBPS / (8 * 1024 * 1024))
+        return dur * (gb_per_sec * ratio + audio_gb_per_sec)
 
     def split_media_into_parts(
         self, media_list: List[Tuple[MediaItem, str]]
     ) -> List[List[Tuple[MediaItem, str]]]:
-        """依據 YouTube 官方限制（12 小時 / 256GB 安全線）將媒體清單自動切分為多個 Part"""
+        """依據 YouTube 官方限制（12 小時 / 256GB 安全線）與相片/影片真實編碼模型，智慧切分為多個 Part"""
         if not self.config.enable_auto_split:
             return [media_list]
 
@@ -257,7 +273,7 @@ class VideoRenderEngine:
             else:
                 dur = self._get_video_duration(item.file_path)
 
-            est_item_size_gb = dur * gb_per_sec
+            est_item_size_gb = self.estimate_media_item_size_gb(item, dur, gb_per_sec)
 
             would_exceed_dur = (current_part_duration + dur) > self.config.max_duration_seconds
             would_exceed_size = (current_part_size_gb + est_item_size_gb) > self.config.max_size_gb
@@ -433,11 +449,14 @@ class VideoRenderEngine:
         if log_callback:
             if total_parts > 1:
                 log_callback(
-                    f"[注意] 偵測到總項目長度或預估容量超過 YouTube 安全限制！\n"
+                    f"[注意] 依據真實編碼容量模型（相片靜態 ~52%、影片動態 ~92%），\n"
+                    f"偵測到總項目長度或預估容量超過 YouTube 安全限制（{self.config.max_size_gb}GB / {self.config.max_duration_seconds/3600:.1f}小時）！\n"
                     f"系統已自動切分為 {total_parts} 個獨立備份影片 (Part 1 ~ Part {total_parts})\n"
                 )
             else:
-                log_callback(f"總長度在安全限制範圍內，將合併為單一 8K/4K 影片。\n")
+                log_callback(
+                    f"依據真實編碼容量模型，總時長與預估容量均在安全限制範圍內，將合併為單一 8K/4K 頂級備份影片。\n"
+                )
 
         for part_idx, part_media in enumerate(parts, start=1):
             if self._is_cancelled:

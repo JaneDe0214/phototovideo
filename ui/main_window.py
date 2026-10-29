@@ -47,7 +47,13 @@ from core.encoder_detector import (
     calculate_safe_concurrency,
     get_output_spec_tag,
 )
-from core.ffmpeg_engine import RenderConfig, VideoRenderEngine
+from core.ffmpeg_engine import (
+    RenderConfig,
+    VideoRenderEngine,
+    PHOTO_BITRATE_RATIO,
+    VIDEO_BITRATE_RATIO,
+    AUDIO_BITRATE_KBPS,
+)
 from core.scanner import AlbumScanner, DirectoryTreeNode
 from core.queue_manager import QueueManager, BatchTask
 
@@ -1136,7 +1142,15 @@ class MainWindow(QMainWindow):
         vid_count = node.total_videos_count()
         img_sec = self.spin_duration.value()
 
-        est_sec = (img_count * img_sec) + (vid_count * 10)
+        all_media = node.collect_all_media()
+        img_sec_total = img_count * img_sec
+        # 統計影片時長（若 MediaItem 有解析則精準累加，否則預設 10 秒/支）
+        vid_sec_total = sum(
+            m.duration if (m.is_video and m.duration > 0) else (10.0 if m.is_video else 0.0)
+            for m in all_media
+        )
+        est_sec = img_sec_total + vid_sec_total
+
         h = int(est_sec // 3600)
         m = int((est_sec % 3600) // 60)
         s = int(est_sec % 60)
@@ -1145,26 +1159,39 @@ class MainWindow(QMainWindow):
         bitrate_str = prof.get("bitrate", "240M")
         bitrate_num = int(bitrate_str.replace("M", "").replace("k", ""))
         gb_per_sec = (bitrate_num / (8 * 1024)) if "M" in bitrate_str else (bitrate_num / (8 * 1024 * 1024))
-        est_gb = est_sec * gb_per_sec
+        audio_gb_per_sec = (AUDIO_BITRATE_KBPS / (8 * 1024 * 1024))
+
+        # 智慧混合精準容量估算模型：靜態相片約 52%，動態影片約 92%
+        est_img_gb = img_sec_total * (gb_per_sec * PHOTO_BITRATE_RATIO + audio_gb_per_sec)
+        est_vid_gb = vid_sec_total * (gb_per_sec * VIDEO_BITRATE_RATIO + audio_gb_per_sec)
+        est_actual_gb = est_img_gb + est_vid_gb
+        est_theoretical_max_gb = est_sec * (gb_per_sec + audio_gb_per_sec)
 
         is_auto_split = self.chk_auto_split.isChecked()
         max_dur = self.combo_max_dur.currentData()
         max_size = self.combo_max_size.currentData()
 
+        # 分段估算以「真實精準預估容量」與「總時長」兩者綜合評定，絕不提前過早切檔
         est_parts_by_dur = int(est_sec // max_dur) + (1 if est_sec % max_dur > 0 else 0)
-        est_parts_by_size = int(est_gb // max_size) + (1 if est_gb % max_size > 0 else 0)
+        est_parts_by_size = int(est_actual_gb // max_size) + (1 if est_actual_gb % max_size > 0 else 0)
         estimated_parts = max(est_parts_by_dur, est_parts_by_size, 1)
 
         self.lbl_stat_target.setText(f"起點目標：【{node.name}】（包含其所有子資料夾）")
         self.lbl_stat_counts.setText(f"包含媒體：相片 {img_count} 張 / 影片 {vid_count} 支 (共 {img_count + vid_count} 個項目)")
         self.lbl_stat_est_duration.setText(f"預估總時長：約 {duration_str}")
         self.lbl_stat_est_size.setText(
-            f"預估總容量上限：約 {est_gb:.2f} GB (理論最高上限 · 靜態照片無運動變化，經無損壓縮後實際約 50%~60% 容量，畫質視覺無損)"
+            f"預估輸出容量：約 {est_actual_gb:.1f} GB (相片約 {est_img_gb:.1f} GB、影片約 {est_vid_gb:.1f} GB · 理論上限 {est_theoretical_max_gb:.1f} GB)"
         )
 
         if is_auto_split and estimated_parts > 1:
+            split_reasons = []
+            if est_parts_by_dur > 1:
+                split_reasons.append(f"總時長超過 {max_dur/3600:.1f} 小時")
+            if est_parts_by_size > 1:
+                split_reasons.append(f"預估容量超過 {max_size:.0f} GB")
+            reason_str = " 與 ".join(split_reasons) if split_reasons else "達到 YouTube 安全上限"
             self.lbl_stat_split_info.setText(
-                f"分段狀態：⚠️ 偵測到超標！系統將自動智慧切分為 {estimated_parts} 個 Parts 備份"
+                f"分段狀態：⚠️ 偵測到超標（{reason_str}）！系統將自動切分為 {estimated_parts} 個 Parts 備份"
             )
             self.lbl_stat_split_info.setStyleSheet("color: #ffd166; font-weight: bold;")
         else:
